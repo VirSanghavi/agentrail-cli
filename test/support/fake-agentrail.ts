@@ -22,6 +22,8 @@ export interface FakeAgentrail {
   readonly deviceAnswers: DeviceAnswer[];
   /** The user agent of every MCP request, in order. */
   readonly userAgents: (string | undefined)[];
+  /** The `x-agentrail-cli` header of every MCP request, in order. */
+  readonly cliHeaders: (string | undefined)[];
   /** When set, tool requests are refused as from an outdated CLI. */
   refuseOutdatedCli: boolean;
   /** When set, MCP requests are refused with 403 and Agentrail's error body. */
@@ -122,6 +124,7 @@ export async function startFakeAgentrail(): Promise<FakeAgentrail> {
     toolCalls: [] as FakeAgentrail['toolCalls'],
     deviceAnswers: [] as DeviceAnswer[],
     userAgents: [] as (string | undefined)[],
+    cliHeaders: [] as (string | undefined)[],
     refuseOutdatedCli: false,
     forbidden: undefined as FakeAgentrail['forbidden'],
     accessTokens: new Set<string>(),
@@ -202,6 +205,8 @@ export async function startFakeAgentrail(): Promise<FakeAgentrail> {
           return;
         }
         fake.userAgents.push(request.headers['user-agent']);
+        const cli = request.headers['x-agentrail-cli'];
+        fake.cliHeaders.push(typeof cli === 'string' ? cli : undefined);
         const body = await bodyOf(request);
         const message = body
           ? (JSON.parse(body) as { id?: unknown; method?: unknown })

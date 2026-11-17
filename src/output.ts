@@ -1,16 +1,17 @@
 import type { Runtime } from './runtime.js';
 
-/**
- * Variables coding agents set in the commands they run. Most agents also run
- * commands without a terminal, which alone selects JSON.
- */
-const AGENT_VARIABLES = ['AGENT', 'AI_AGENT', 'CLAUDECODE', 'CURSOR_AGENT'];
-
 export type OutputMode = 'json' | 'table';
 
-/** JSON for programs and agents, a table for a person (CLI-003). */
+/**
+ * JSON for programs and agents, a table for a person (CLI-003). The agent
+ * is the CLI SDK's, from the variables each coding agent sets in the
+ * commands it runs; `AGENT` set to anything also counts, as agents.md had
+ * agents set it. Most agents also run commands without a terminal, which
+ * alone selects JSON.
+ */
 export function outputMode(runtime: Runtime, json: boolean): OutputMode {
-  const agent = AGENT_VARIABLES.some((name) => runtime.env[name]);
+  const agent =
+    runtime.agentrail.agent !== null || Boolean(runtime.env.AGENT?.trim());
   return json || agent || !runtime.stdout.isTTY ? 'json' : 'table';
 }
 

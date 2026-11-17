@@ -52,6 +52,13 @@ just `agentrail`: it belongs to someone else.
   `logout` removes the sign-in from both places. A token in
   `AGENTRAIL_TOKEN` is used as given, wins over a stored sign-in, and is
   never stored.
+- **What Agentrail is told.** Each request to Agentrail names the command
+  that ran (by its words, never its inputs), the run, and the coding agent
+  running it, with that agent's session as a one-way hash, so Agentrail can
+  join an agent's runs into one journey. It goes only to Agentrail's own
+  servers, through [`agentrail-cli-sdk`](https://www.npmjs.com/package/agentrail-cli-sdk).
+  `DO_NOT_TRACK=1` turns it off; `AGENTRAIL_CLI_DEBUG=1` prints it to
+  stderr.
 
 ## Exit codes
 

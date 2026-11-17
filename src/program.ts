@@ -549,7 +549,9 @@ export async function run(
     (error: unknown) => `The update check failed:\n${inspect(error)}`,
   );
   try {
-    const program = baseProgram(runtime);
+    // Names each command as it runs, by its declared words, on every request
+    // it makes to Agentrail.
+    const program = runtime.agentrail.commander(baseProgram(runtime));
     builtIns(program, runtime);
     const { words, env, help } = commandWords(argv);
     const [first] = words;

@@ -5,8 +5,10 @@ import { homedir } from 'node:os';
 import { delimiter, join } from 'node:path';
 
 import { Entry } from '@napi-rs/keyring';
+import type { CliSdk } from 'agentrail-cli-sdk';
 
 import { ENVIRONMENTS, type Environments } from './environments.js';
+import { instrument, withHeaders } from './instrumentation.js';
 
 /**
  * The OS keychain, by account name. Each call throws where it cannot be used:
@@ -47,7 +49,10 @@ export interface Runtime {
   readonly stdout: Stream;
   readonly stderr: Stream;
   readonly stdinIsTTY: boolean;
+  /** Puts the CLI's `x-agentrail-cli` header on requests to Agentrail (`instrumentation.ts`). */
   readonly fetch: typeof fetch;
+  /** The CLI SDK: the agent running the CLI, and the command it ran. */
+  readonly agentrail: CliSdk;
   readonly keychain: Keychain;
   readonly now: () => Date;
   readonly sleep: (milliseconds: number) => Promise<void>;
@@ -158,6 +163,11 @@ function isTerminal(stream: { readonly isTTY?: boolean }): boolean {
 }
 
 export function processRuntime(): Runtime {
+  const agentrail = instrument(ENVIRONMENTS, process.env, (error) => {
+    process.stderr.write(
+      `agentrail-cli could not say which command ran: ${error.message}\n`,
+    );
+  });
   return {
     env: process.env,
     environments: ENVIRONMENTS,
@@ -173,7 +183,8 @@ export function processRuntime(): Runtime {
       isTTY: isTerminal(process.stderr),
     },
     stdinIsTTY: isTerminal(process.stdin),
-    fetch: globalThis.fetch,
+    fetch: withHeaders(globalThis.fetch, agentrail),
+    agentrail,
     keychain: systemKeychain(),
     now: () => new Date(),
     sleep: (milliseconds) =>

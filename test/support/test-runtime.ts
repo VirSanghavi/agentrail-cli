@@ -2,8 +2,18 @@ import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import type { CliSdk } from 'agentrail-cli-sdk';
+import { afterEach } from 'vitest';
+
 import type { Environments } from '../../src/environments.js';
+import { instrument, withHeaders } from '../../src/instrumentation.js';
 import type { Executed, Keychain, Runtime } from '../../src/runtime.js';
+
+/** Each test's CLI SDK, closed after it: its request hooks are the process's. */
+const instrumented: CliSdk[] = [];
+afterEach(() => {
+  for (const agentrail of instrumented.splice(0)) agentrail.close();
+});
 
 /** A keychain in memory, by account. */
 export function memoryKeychain(): Keychain & { entries: Map<string, string> } {
@@ -71,9 +81,14 @@ export async function testRuntime(options: {
     dev: { name: 'dev', mcpUrl: options.mcpUrl, clientId: 'client_test' },
   };
   const terminal = options.terminal ?? false;
+  // No test asks the real npm registry unless it turns the check back on.
+  const env = { AGENTRAIL_NO_UPDATE_CHECK: '1', ...options.env };
+  const agentrail = instrument(environments, env, (error) => {
+    throw error;
+  });
+  instrumented.push(agentrail);
   const runtime: Runtime = {
-    // No test asks the real npm registry unless it turns the check back on.
-    env: { AGENTRAIL_NO_UPDATE_CHECK: '1', ...options.env },
+    env,
     environments,
     cwd: options.cwd ?? (await mkdtemp(join(tmpdir(), 'agentrail-cwd-'))),
     configDir,
@@ -92,7 +107,8 @@ export async function testRuntime(options: {
       isTTY: terminal,
     },
     stdinIsTTY: terminal,
-    fetch: options.fetch ?? globalThis.fetch,
+    fetch: withHeaders(options.fetch ?? globalThis.fetch, agentrail),
+    agentrail,
     keychain: options.keychain ?? memoryKeychain(),
     now: options.now ?? (() => new Date()),
     sleep: (milliseconds) => {

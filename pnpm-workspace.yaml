@@ -1,5 +1,10 @@
 # Supply-chain cooldown, as in argus: refuse versions published in the last
 # three days, so a compromised release is not installed before it is pulled.
 minimumReleaseAge: 4320
+# Versions pinned while still inside that window: our own SDK, published from
+# agentrail-co/agentrail-js with provenance, as argus excludes it.
+minimumReleaseAgeExclude:
+  - agentrail-cli-sdk@0.4.0
+  - agentrail-core@0.4.0
 allowBuilds:
   esbuild: true
