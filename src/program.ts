@@ -34,7 +34,7 @@ import {
   writeLink,
 } from './workspace.js';
 
-const ISSUES_URL = 'https://github.com/GrowthOS-co/agentrail-cli/issues';
+const ISSUES_URL = 'https://github.com/agentrail-co/agentrail-cli/issues';
 
 const BUILT_INS = [
   'login',
@@ -549,7 +549,9 @@ export async function run(
     (error: unknown) => `The update check failed:\n${inspect(error)}`,
   );
   try {
-    const program = baseProgram(runtime);
+    // Names each command as it runs, by its declared words, on every request
+    // it makes to Agentrail.
+    const program = runtime.agentrail.commander(baseProgram(runtime));
     builtIns(program, runtime);
     const { words, env, help } = commandWords(argv);
     const [first] = words;

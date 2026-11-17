@@ -1,13 +1,13 @@
 {
   "name": "agentrail-cli",
-  "version": "0.1.0-dev.3",
+  "version": "0.1.0",
   "description": "The Agentrail command line: sign in, then use every Agentrail tool from a terminal or an AI coding agent.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/GrowthOS-co/agentrail-cli.git"
+    "url": "git+https://github.com/agentrail-co/agentrail-cli.git"
   },
-  "homepage": "https://github.com/GrowthOS-co/agentrail-cli#readme",
+  "homepage": "https://github.com/agentrail-co/agentrail-cli#readme",
   "type": "module",
   "bin": {
     "agentrail": "dist/cli.js"
@@ -28,19 +28,20 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@modelcontextprotocol/client": "2.3.0",
-    "@napi-rs/keyring": "2.1.0",
-    "commander": "15.0.0"
+    "@modelcontextprotocol/client": "2.4.0",
+    "@napi-rs/keyring": "2.1.2",
+    "agentrail-cli-sdk": "0.4.0",
+    "commander": "15.1.0"
   },
   "devDependencies": {
-    "@modelcontextprotocol/server": "2.3.0",
-    "@types/node": "24.13.3",
-    "eslint": "10.8.1",
+    "@modelcontextprotocol/server": "2.4.0",
+    "@types/node": "24.19.2",
+    "eslint": "10.15.0",
     "eslint-config-prettier": "10.1.8",
-    "prettier": "3.9.6",
+    "prettier": "3.10.1",
     "typescript": "6.0.3",
-    "typescript-eslint": "8.66.0",
-    "vitest": "4.1.11",
-    "zod": "4.6.6"
+    "typescript-eslint": "8.72.2",
+    "vitest": "5.1.0",
+    "zod": "4.6.7"
   }
 }

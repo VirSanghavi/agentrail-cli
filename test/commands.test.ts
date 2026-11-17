@@ -28,7 +28,12 @@ afterEach(async () => {
 
 /** A runtime signed in to the fake as dev. */
 async function signedIn(
-  options: { terminal?: boolean; mcpUrl?: string; cwd?: string } = {},
+  options: {
+    terminal?: boolean;
+    mcpUrl?: string;
+    cwd?: string;
+    env?: Record<string, string>;
+  } = {},
 ) {
   agentrail.accessTokens.add('access-signed-in');
   const keychain = memoryKeychain();
@@ -132,6 +137,40 @@ describe('product commands', () => {
     expect(agentrail.toolCalls.map((call) => call.name)).toEqual([
       'competitors_list',
     ]);
+  });
+
+  // Fails if someone drops the CLI SDK, names the command by what was typed,
+  // or sends the agent's own session id: Agentrail could not join an
+  // agent's CLI runs into its journey, or the session would leave the
+  // machine. Also fails if DO_NOT_TRACK stops turning it off.
+  it('tells Agentrail which command an agent ran, in its session, and nothing when told not to', async () => {
+    const session = '3f1c9a52-0d4e-4c55-9f7a-2b8e6d1c0a77';
+    const env = {
+      AI_AGENT: 'claude-code_2-1-325_agent',
+      CLAUDECODE: '1',
+      CLAUDE_CODE_SESSION_ID: session,
+    };
+    const cli = await signedIn({ env });
+    expect(
+      await run(cli.runtime, ['--env', 'dev', 'competitors', 'list']),
+    ).toBe(0);
+    const [header] = agentrail.cliHeaders.slice(-1);
+    expect(header).toMatch(/^v=1, sdk="[^"]+", cli="agentrail", /u);
+    expect(header).toContain(`cliv="${VERSION}"`);
+    expect(header).toContain('cmd="competitors list"');
+    expect(header).toContain('agent="claude-code"');
+    expect(header).toContain('sesfrom=agent');
+    expect(agentrail.cliHeaders.join('\n')).not.toContain(session);
+
+    const before = agentrail.cliHeaders.length;
+    const untracked = await signedIn({ env: { ...env, DO_NOT_TRACK: '1' } });
+    expect(
+      await run(untracked.runtime, ['--env', 'dev', 'competitors', 'list']),
+    ).toBe(0);
+    expect(
+      agentrail.cliHeaders.slice(before).every((value) => value === undefined),
+    ).toBe(true);
+    expect(agentrail.cliHeaders.length).toBeGreaterThan(before);
   });
 
   // CLI-008: the server can only refuse an outdated CLI it can recognise,
