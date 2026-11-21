@@ -20,10 +20,31 @@ afterEach(async () => {
 });
 
 describe('agentrail login', () => {
-  // The token must be for the MCP server: without `resource`, AuthKit issues
-  // one the server refuses. A slowed-down poll must wait longer, as RFC 8628
-  // requires, or the authorization server stops answering.
-  it('signs in with the device flow for the MCP resource, waiting longer when told to slow down', async () => {
+  // The token must be for the MCP server: without `resource` on the device
+  // request and on every exchange of the device code, the server is issued
+  // one it refuses. Agentrail's own sign-in names its scope, and grants
+  // nothing without it; WorkOS's takes OpenID's, so an environment switched
+  // back to WorkOS still signs in. A slowed-down poll must wait longer, as
+  // RFC 8628 requires, or the authorization server stops answering.
+  it.each([
+    ['agentrail', 'mcp offline_access'],
+    ['workos', 'openid profile email offline_access'],
+  ] as const)(
+    'signs in to %s with the device flow for the MCP resource, waiting longer when told to slow down',
+    async (signIn, scope) => {
+      const server =
+        signIn === 'agentrail'
+          ? agentrail
+          : await startFakeAgentrail({ signIn });
+      try {
+        await signsIn(server, scope);
+      } finally {
+        if (server !== agentrail) await server.close();
+      }
+    },
+  );
+
+  async function signsIn(agentrail: FakeAgentrail, scope: string) {
     const keychain = memoryKeychain();
     const cli = await testRuntime({
       mcpUrl: agentrail.mcpUrl,
@@ -41,18 +62,29 @@ describe('agentrail login', () => {
     const [device] = agentrail.deviceRequests;
     expect(Object.fromEntries(device ?? [])).toEqual({
       client_id: 'client_test',
-      scope: 'openid profile email offline_access',
+      scope,
       resource: agentrail.mcpUrl,
     });
+    expect(
+      agentrail.tokenRequests.map((form) => Object.fromEntries(form)),
+    ).toEqual(
+      Array(3).fill({
+        grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+        device_code: 'device-1',
+        client_id: 'client_test',
+        resource: agentrail.mcpUrl,
+      }),
+    );
     expect(cli.sleeps).toEqual([5_000, 5_000, 10_000]);
     expect(cli.opened).toEqual([expect.stringContaining('ABCD-EFGH')]);
     expect(cli.stderr()).toContain('ABCD-EFGH');
     expect(JSON.parse(keychain.entries.get('dev') ?? '{}')).toMatchObject({
       accessToken: 'access-1',
       refreshToken: 'refresh-1',
+      tokenEndpoint: agentrail.tokenEndpoint,
       resource: agentrail.mcpUrl,
     });
-  });
+  }
 
   // CLI-005: an agent has no terminal to wait in. Its first run hands back
   // what the person must do; its next run finishes.

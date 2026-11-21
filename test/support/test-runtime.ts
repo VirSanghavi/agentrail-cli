@@ -49,6 +49,8 @@ export interface TestRuntime {
   readonly configDir: string;
   /** Every program the CLI ran, with its arguments. */
   readonly executed: string[][];
+  /** Every question the CLI asked the person, with the labels it offered. */
+  readonly asked: { question: string; labels: string[] }[];
 }
 
 /** A runtime whose dev environment is a fake Agentrail at `mcpUrl`. */
@@ -63,14 +65,20 @@ export async function testRuntime(options: {
   fetch?: typeof fetch;
   /** Runs at each wait the CLI asks for, as if that long had passed. */
   onSleep?: () => void;
+  /** Waits for real, for commands that wait on one another. */
+  realSleep?: boolean;
   /** Programs on the PATH, and how each call to one ends. */
   commands?: Readonly<Record<string, (args: readonly string[]) => Executed>>;
+  /** The labels the person picks, in order, when the CLI asks. */
+  picks?: string[];
 }): Promise<TestRuntime> {
   let out = '';
   let err = '';
   const sleeps: number[] = [];
   const opened: string[] = [];
   const executed: string[][] = [];
+  const asked: TestRuntime['asked'] = [];
+  const picks = [...(options.picks ?? [])];
   const configDir = await mkdtemp(join(tmpdir(), 'agentrail-config-'));
   const environments: Environments = {
     prod: {
@@ -114,10 +122,24 @@ export async function testRuntime(options: {
     sleep: (milliseconds) => {
       sleeps.push(milliseconds);
       options.onSleep?.();
-      return Promise.resolve();
+      return options.realSleep === true
+        ? new Promise((resolve) => setTimeout(resolve, milliseconds))
+        : Promise.resolve();
     },
     openBrowser: (url) => {
       opened.push(url);
+    },
+    choose: (question, choices) => {
+      const labels = choices.map((choice) => choice.label);
+      asked.push({ question, labels });
+      const pick = picks.shift();
+      const index = labels.indexOf(pick ?? '');
+      if (index === -1 || choices[index]?.unavailable !== undefined) {
+        throw new Error(
+          `test picked ${String(pick)} from ${labels.join(', ')}`,
+        );
+      }
+      return Promise.resolve(index);
     },
     hasCommand: (name) =>
       Promise.resolve(options.commands?.[name] !== undefined),
@@ -136,5 +158,6 @@ export async function testRuntime(options: {
     opened,
     configDir,
     executed,
+    asked,
   };
 }

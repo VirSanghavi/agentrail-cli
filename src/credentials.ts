@@ -14,7 +14,7 @@ import type { Runtime } from './runtime.js';
 export interface Credential {
   readonly environment: EnvironmentName;
   readonly accessToken: string;
-  /** Replaced after every refresh: WorkOS accepts each one once. */
+  /** Replaced after every refresh: each is accepted once. */
   readonly refreshToken: string | undefined;
   readonly expiresAt: string;
   readonly tokenEndpoint: string;
@@ -39,8 +39,33 @@ export function commandFor(environment: Environment, command: string): string {
   return `agentrail ${command}${environment.name === 'prod' ? '' : ` --env ${environment.name}`}`;
 }
 
-function filePath(runtime: Runtime, environment: EnvironmentName): string {
-  return join(runtime.configDir, 'credentials', `${environment}.json`);
+/**
+ * Where each of an environment's sign-ins is kept: `organizationId` is
+ * undefined for the one the person approved in the browser, which keeps
+ * 0.1's names, else the organization the CLI switched to.
+ */
+function filePath(
+  runtime: Runtime,
+  environment: EnvironmentName,
+  organizationId: string | undefined,
+): string {
+  return organizationId === undefined
+    ? join(runtime.configDir, 'credentials', `${environment}.json`)
+    : join(
+        runtime.configDir,
+        'credentials',
+        environment,
+        `${organizationId}.json`,
+      );
+}
+
+function accountOf(
+  environment: EnvironmentName,
+  organizationId: string | undefined,
+): string {
+  return organizationId === undefined
+    ? environment
+    : `${environment}/${organizationId}`;
 }
 
 function isCredential(value: unknown): value is Credential {
@@ -66,8 +91,9 @@ function notOurs(environment: Environment, where: string): CliError {
 async function fromFile(
   runtime: Runtime,
   environment: Environment,
+  organizationId: string | undefined,
 ): Promise<Credential | undefined> {
-  const path = filePath(runtime, environment.name);
+  const path = filePath(runtime, environment.name, organizationId);
   let value: unknown;
   try {
     value = await readJson(path);
@@ -87,10 +113,11 @@ function keychainHint(environment: Environment): string {
 function fromKeychain(
   runtime: Runtime,
   environment: Environment,
+  organizationId: string | undefined,
 ): Credential | undefined {
   let secret: string | null;
   try {
-    secret = runtime.keychain.get(environment.name);
+    secret = runtime.keychain.get(accountOf(environment.name, organizationId));
   } catch (error) {
     throw new CliError(
       EXIT.signIn,
@@ -116,10 +143,11 @@ function fromKeychain(
 export async function loadCredential(
   runtime: Runtime,
   environment: Environment,
+  organizationId?: string,
 ): Promise<StoredCredential | undefined> {
-  const file = await fromFile(runtime, environment);
+  const file = await fromFile(runtime, environment, organizationId);
   if (file !== undefined) return { credential: file, storage: 'file' };
-  const kept = fromKeychain(runtime, environment);
+  const kept = fromKeychain(runtime, environment, organizationId);
   return kept === undefined
     ? undefined
     : { credential: kept, storage: 'keychain' };
@@ -130,14 +158,18 @@ export async function saveCredential(
   environment: Environment,
   credential: Credential,
   storage: Storage,
+  organizationId?: string,
 ): Promise<void> {
-  const path = filePath(runtime, environment.name);
+  const path = filePath(runtime, environment.name, organizationId);
   if (storage === 'file') {
     await writePrivateJson(path, credential);
     return;
   }
   try {
-    runtime.keychain.set(environment.name, JSON.stringify(credential));
+    runtime.keychain.set(
+      accountOf(environment.name, organizationId),
+      JSON.stringify(credential),
+    );
   } catch (error) {
     throw new CliError(
       EXIT.usage,
@@ -175,12 +207,17 @@ export interface Removal {
 export async function deleteCredential(
   runtime: Runtime,
   environment: Environment,
+  organizationId?: string,
 ): Promise<Removal> {
-  const file = await removeFile(filePath(runtime, environment.name));
+  const file = await removeFile(
+    filePath(runtime, environment.name, organizationId),
+  );
   try {
     return {
       file,
-      keychain: runtime.keychain.delete(environment.name),
+      keychain: runtime.keychain.delete(
+        accountOf(environment.name, organizationId),
+      ),
       keychainFailure: undefined,
     };
   } catch (error) {

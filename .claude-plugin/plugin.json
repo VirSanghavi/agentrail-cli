@@ -1,6 +1,6 @@
 {
   "name": "agentrail",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Use Agentrail from Claude Code: see how AI coding agents treat a brand's product, run simulations and review them.",
   "author": { "name": "Agentrail" },
   "homepage": "https://github.com/agentrail-co/agentrail-cli",

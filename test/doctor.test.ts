@@ -39,6 +39,6 @@ describe('agentrail doctor', () => {
       env: { AGENTRAIL_TOKEN: 'given-token' },
     });
     expect(await run(signedIn.runtime, ['--env', 'dev', 'doctor'])).toBe(0);
-    expect(signedIn.stdout()).toContain('3 available to you');
+    expect(signedIn.stdout()).toContain('4 available to you');
   });
 });

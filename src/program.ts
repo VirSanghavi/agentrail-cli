@@ -11,7 +11,7 @@ import {
   kindOf,
   loadCatalog,
 } from './catalog.js';
-import { deleteCredential, loadCredential } from './credentials.js';
+import { loadCredential } from './credentials.js';
 import { diagnose } from './doctor.js';
 import { selectEnvironment, type Environment } from './environments.js';
 import { CliError, EXIT, type ExitCode } from './errors.js';
@@ -21,13 +21,21 @@ import {
   pendingLogin,
   startDeviceLogin,
 } from './login.js';
-import { withServer, type CatalogTool, type Connection } from './mcp.js';
+import { withServer, type CatalogTool } from './mcp.js';
+import {
+  listOrganizations,
+  recordBrowserOrganization,
+} from './organizations.js';
 import { outputMode, printData, say } from './output.js';
 import type { Runtime } from './runtime.js';
+import { loadSignIns } from './sign-ins.js';
+import { signOut } from './sign-out.js';
+import { addSwitchCommands } from './switch-commands.js';
 import { newestVersion, UPDATE_TIMEOUT_MS, updateNotice } from './updates.js';
 import { VERSION } from './version.js';
 import { isNewer } from './versions.js';
 import {
+  everyWorkspace,
   findLinkFile,
   removeLink,
   workspaceFor,
@@ -43,6 +51,8 @@ const BUILT_INS = [
   'tools',
   'link',
   'unlink',
+  'org',
+  'workspace',
   'doctor',
   'update',
   'agent',
@@ -84,6 +94,13 @@ function commandWords(argv: readonly string[]): {
     }
   }
   return { words, env, help: argv.includes('--help') || argv.includes('-h') };
+}
+
+/** Names as a person says them: "A", "A and B", "A, B and C". */
+function spoken(names: readonly string[]): string {
+  return names.length <= 1
+    ? names.join('')
+    : `${names.slice(0, -1).join(', ')} and ${names.at(-1) ?? ''}`;
 }
 
 function globalsOf(command: Command): GlobalOptions {
@@ -183,28 +200,6 @@ async function addAreaCommands(
   for (const tool of tools) addToolCommand(area, tool, runtime, environment);
 }
 
-async function everyWorkspace(
-  server: Connection,
-): Promise<{ id: string; name: string }[]> {
-  const workspaces: { id: string; name: string }[] = [];
-  let cursor: string | undefined;
-  do {
-    const reply = await server.callTool('workspaces_list', {
-      limit: 100,
-      ...(cursor === undefined ? {} : { cursor }),
-    });
-    if (reply.kind === 'refused')
-      throw new CliError(EXIT.refused, reply.message);
-    const page = reply.data as {
-      items: { id: string; name: string }[];
-      nextCursor: string | null;
-    };
-    workspaces.push(...page.items);
-    cursor = page.nextCursor ?? undefined;
-  } while (cursor !== undefined);
-  return workspaces;
-}
-
 function builtIns(program: Command, runtime: Runtime): void {
   const environmentOf = (command: Command) =>
     selectEnvironment(globalsOf(command).env, runtime);
@@ -274,7 +269,9 @@ function builtIns(program: Command, runtime: Runtime): void {
 
   program
     .command('logout')
-    .description('Forget this computer’s sign-in.')
+    .description(
+      'Sign out: end this computer’s sign-ins at Agentrail, one for each organization, and forget them.',
+    )
     .action(async (_options: unknown, self: Command) => {
       const environment = environmentOf(self);
       // Said first, as no sign-in removed here stops commands using it.
@@ -284,7 +281,8 @@ function builtIns(program: Command, runtime: Runtime): void {
           'AGENTRAIL_TOKEN is still set, and commands use it: unset it to stop.',
         );
       }
-      const removed = await deleteCredential(runtime, environment);
+      const result = await signOut(runtime, environment);
+      const removed = result.browser;
       const places = [
         ...(removed.file ? ['the credentials file'] : []),
         ...(removed.keychain ? ['the OS keychain'] : []),
@@ -293,7 +291,15 @@ function builtIns(program: Command, runtime: Runtime): void {
         removed.keychainFailure === undefined
           ? ''
           : ` Could not check the OS keychain (${removed.keychainFailure}).`;
-      if (places.length === 0 && removed.keychainFailure !== undefined) {
+      const others =
+        result.switched === 0
+          ? ''
+          : ` Also removed ${String(result.switched)} sign-in${result.switched === 1 ? '' : 's'} made by switching organization.`;
+      if (
+        places.length === 0 &&
+        result.switched === 0 &&
+        removed.keychainFailure !== undefined
+      ) {
         throw new CliError(
           EXIT.signIn,
           `No credentials file for Agentrail ${environment.name}.${unchecked}`,
@@ -301,29 +307,54 @@ function builtIns(program: Command, runtime: Runtime): void {
       }
       say(
         runtime,
-        places.length === 0
+        places.length === 0 && result.switched === 0
           ? `Not signed in to Agentrail ${environment.name}.`
-          : `Signed out of Agentrail ${environment.name}: removed the sign-in from ${places.join(' and ')}.${unchecked}`,
+          : `Signed out of Agentrail ${environment.name}: removed the sign-in from ${places.length === 0 ? 'this computer' : places.join(' and ')}.${others}${unchecked}`,
       );
+      if (result.notEnded !== undefined) {
+        const { organizations, reason } = result.notEnded;
+        const one = organizations.length === 1;
+        throw new CliError(
+          EXIT.unavailable,
+          `Agentrail ${environment.name} could not be told to end your sign-in${one ? '' : 's'} to ${spoken(organizations)}: ${reason} ${one ? 'It is' : 'They are'} gone from this computer; disconnect the Agentrail CLI in Agentrail's Settings of ${spoken(organizations)} to end ${one ? 'it' : 'them'} there.`,
+        );
+      }
     });
 
   program
     .command('whoami')
     .description(
-      'Show who you are signed in as and the workspace commands use.',
+      'Show who you are signed in as, and the organization and workspace commands use.',
     )
     .action(async (_options: unknown, self: Command) => {
       const environment = environmentOf(self);
       // AGENTRAIL_TOKEN wins over a stored sign-in, so it is the one shown.
       const given = Boolean(runtime.env.AGENTRAIL_TOKEN);
-      const stored = given
+      const signIns = given
         ? undefined
-        : await loadCredential(runtime, environment);
-      const reply = await withServer(runtime, environment, (server) =>
-        server.callTool('workspaces_list', {}),
+        : await loadSignIns(runtime, environment);
+      const stored =
+        signIns === undefined
+          ? undefined
+          : await loadCredential(
+              runtime,
+              environment,
+              signIns.active ?? undefined,
+            );
+      const { reply, organizations } = await withServer(
+        runtime,
+        environment,
+        async (server) => ({
+          reply: await server.callTool('workspaces_list', {}),
+          organizations: await listOrganizations(server),
+        }),
       );
       if (reply.kind === 'refused')
         throw new CliError(EXIT.refused, reply.message);
+      const organization = organizations.find((one) => one.current);
+      if (signIns?.active === null) {
+        await recordBrowserOrganization(runtime, environment, organizations);
+      }
       const linked = await workspaceFor(
         runtime,
         environment,
@@ -335,6 +366,8 @@ function builtIns(program: Command, runtime: Runtime): void {
       printData(runtime, outputMode(runtime, globalsOf(self).json === true), {
         environment: environment.name,
         email: stored?.credential.email ?? null,
+        organizationId: organization?.id ?? null,
+        organizationName: organization?.name ?? null,
         signedInUntil: stored?.credential.expiresAt ?? null,
         workspaceId: linked ?? data.defaultWorkspaceId,
       });
@@ -388,7 +421,7 @@ function builtIns(program: Command, runtime: Runtime): void {
             'Name the workspace: agentrail link <workspaceId>. Run agentrail workspaces list to see them.',
           );
         }
-        const workspaces = await withServer(
+        const { workspaces } = await withServer(
           runtime,
           environment,
           everyWorkspace,
@@ -494,6 +527,12 @@ function builtIns(program: Command, runtime: Runtime): void {
         }
       },
     );
+
+  addSwitchCommands(program, {
+    runtime,
+    environmentOf,
+    json: (command) => globalsOf(command).json === true,
+  });
 
   program
     .command('unlink')

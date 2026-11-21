@@ -42,7 +42,7 @@ async function signedIn(
     accessToken: 'access-signed-in',
     refreshToken: undefined,
     expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
-    tokenEndpoint: new URL('/oauth2/token', agentrail.mcpUrl).href,
+    tokenEndpoint: agentrail.tokenEndpoint,
     clientId: 'client_test',
     resource: agentrail.mcpUrl,
     email: undefined,
