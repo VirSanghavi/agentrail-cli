@@ -103,18 +103,26 @@ function agentrailServer(
     {
       title: 'List your organizations',
       description: 'Lists your organizations.',
-      inputSchema: z.object({}),
+      inputSchema: z.object({
+        limit: z.number().optional().describe('Items per page.'),
+        cursor: z.string().optional().describe('Next page.'),
+      }),
       annotations: { readOnlyHint: true },
     },
     (input) => {
       record('organizations_list', input);
-      return reply(`${String(fake.organizations.length)} organizations.`, {
-        organizations: fake.organizations.map((one) => ({
+      // Pages of two, whatever the limit, so every list of three spans pages.
+      const start = Number(input.cursor ?? '0');
+      const page = fake.organizations.slice(start, start + 2);
+      const next = start + 2;
+      return reply(`${String(page.length)} organizations.`, {
+        organizations: page.map((one) => ({
           id: one.id,
           name: one.name,
           current: one.id === organizationId,
           agentAccess: one.agentAccess,
         })),
+        nextCursor: next < fake.organizations.length ? String(next) : null,
       });
     },
   );

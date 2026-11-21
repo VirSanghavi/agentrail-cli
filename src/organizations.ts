@@ -29,15 +29,27 @@ const ORGANIZATION_ID =
 /** The library behind Agentrail's sign-in says only this for any refused grant. */
 const UNEXPLAINED_GRANT = 'grant request is invalid';
 
-/** The person's organizations, marking the one the asking sign-in acts in. */
+/** The person's organizations, every page, marking the one the asking sign-in acts in. */
 export async function listOrganizations(
   server: Connection,
 ): Promise<ListedOrganization[]> {
-  const reply = await server.callTool('organizations_list', {});
-  if (reply.kind === 'refused') throw new CliError(EXIT.refused, reply.message);
-  const { organizations } = reply.data as {
-    organizations: ListedOrganization[];
-  };
+  const organizations: ListedOrganization[] = [];
+  let cursor: string | undefined;
+  do {
+    const reply = await server.callTool('organizations_list', {
+      limit: 100,
+      ...(cursor === undefined ? {} : { cursor }),
+    });
+    if (reply.kind === 'refused') {
+      throw new CliError(EXIT.refused, reply.message);
+    }
+    const page = reply.data as {
+      organizations: ListedOrganization[];
+      nextCursor: string | null;
+    };
+    organizations.push(...page.organizations);
+    cursor = page.nextCursor ?? undefined;
+  } while (cursor !== undefined);
   for (const organization of organizations) {
     if (!ORGANIZATION_ID.test(organization.id)) {
       throw new CliError(
