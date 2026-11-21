@@ -159,6 +159,7 @@ export async function completeDeviceLogin(
       grant_type: DEVICE_CODE_GRANT,
       device_code: pending.deviceCode,
       client_id: pending.clientId,
+      resource: pending.resource,
     });
     if (answer.kind === 'tokens') {
       // The device code is spent once it has been exchanged: a sign-in that

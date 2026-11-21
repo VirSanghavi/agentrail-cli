@@ -20,8 +20,9 @@ afterEach(async () => {
 });
 
 describe('agentrail login', () => {
-  // The token must be for the MCP server: without `resource`, AuthKit issues
-  // one the server refuses. A slowed-down poll must wait longer, as RFC 8628
+  // The token must be for the MCP server: without `resource` on the device
+  // request and on every exchange of the device code, AuthKit issues one the
+  // server refuses. A slowed-down poll must wait longer, as RFC 8628
   // requires, or the authorization server stops answering.
   it('signs in with the device flow for the MCP resource, waiting longer when told to slow down', async () => {
     const keychain = memoryKeychain();
@@ -44,6 +45,16 @@ describe('agentrail login', () => {
       scope: 'openid profile email offline_access',
       resource: agentrail.mcpUrl,
     });
+    expect(
+      agentrail.tokenRequests.map((form) => Object.fromEntries(form)),
+    ).toEqual(
+      Array(3).fill({
+        grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+        device_code: 'device-1',
+        client_id: 'client_test',
+        resource: agentrail.mcpUrl,
+      }),
+    );
     expect(cli.sleeps).toEqual([5_000, 5_000, 10_000]);
     expect(cli.opened).toEqual([expect.stringContaining('ABCD-EFGH')]);
     expect(cli.stderr()).toContain('ABCD-EFGH');
