@@ -15,12 +15,10 @@ import {
 import { CliError, EXIT } from './errors.js';
 import { readJson, removeFile, writePrivateJson } from './files.js';
 import type { Runtime } from './runtime.js';
+import { replaceSignIns, signInsToReplace } from './sign-ins.js';
 import { credentialFrom, postForm, requestTokens } from './tokens.js';
 
 const DEVICE_CODE_GRANT = 'urn:ietf:params:oauth:grant-type:device_code';
-// offline_access asks for a refresh token, so a sign-in outlives its
-// short-lived access token.
-const SCOPE = 'openid profile email offline_access';
 /** RFC 8628 §3.2: the polling interval when the server names none. */
 const DEFAULT_INTERVAL_SECONDS = 5;
 /** RFC 8628 §3.5: how much longer to wait after `slow_down`. */
@@ -69,7 +67,11 @@ export async function startDeviceLogin(
     runtime,
     endpoints.deviceAuthorizationEndpoint,
     // The resource makes the token one the MCP server accepts (RFC 8707).
-    { client_id: clientId, scope: SCOPE, resource: endpoints.resource },
+    {
+      client_id: clientId,
+      scope: endpoints.scope,
+      resource: endpoints.resource,
+    },
   );
   if (
     status !== 200 ||
@@ -172,6 +174,14 @@ export async function completeDeviceLogin(
         resource: pending.resource,
       });
       await saveCredential(runtime, environment, credential, pending.storage);
+      // Commands now act in the organization just approved, which need not
+      // be the last sign-in's. Sign-ins made by switching stay.
+      const signIns = await signInsToReplace(runtime, environment);
+      await replaceSignIns(runtime, environment, {
+        ...signIns,
+        browser: null,
+        active: null,
+      });
       return credential;
     }
     switch (answer.error) {

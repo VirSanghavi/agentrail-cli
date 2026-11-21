@@ -7,19 +7,41 @@ import { z } from 'zod';
 /** One thing the fake's token endpoint answers a device-code poll with. */
 export type DeviceAnswer = { error: string } | 'tokens';
 
+export interface FakeOrganization {
+  readonly id: string;
+  readonly name: string;
+  agentAccess: boolean;
+}
+
+export const ACME = '0b6f4c8e-1d2a-4f3b-9c5d-7e8f9a0b1c2d';
+export const BETA = '1c7a5d9f-2e3b-4a4c-8d6e-8f9a0b1c2d3e';
+export const GAMMA = '2d8b6e0a-3f4c-4b5d-9e7f-9a0b1c2d3e4f';
+
 /**
  * A stand-in for an Agentrail environment over real HTTP: the MCP server's
- * protected-resource metadata, an authorization server with device and token
- * endpoints, and an MCP server with a few tools that accepts only the tokens
- * this fake issued. It records what the CLI sent.
+ * protected-resource metadata, an authorization server with device, token
+ * and revocation endpoints, and an MCP server with a few tools that accepts
+ * only the tokens this fake issued. Each token acts in one organization.
+ * It records what the CLI sent.
+ *
+ * `agentrail` is Agentrail's own sign-in server on the MCP host, which names
+ * its scope and switches organization by token exchange. `workos` is the
+ * shape of WorkOS's AuthKit, which an environment can be switched back to.
  */
 export interface FakeAgentrail {
   readonly mcpUrl: string;
+  readonly tokenEndpoint: string;
   readonly deviceRequests: URLSearchParams[];
   readonly tokenRequests: URLSearchParams[];
+  readonly revocations: URLSearchParams[];
   readonly toolCalls: { name: string; input: Record<string, unknown> }[];
+  /** The organization each tool call acted in, in order. */
+  readonly toolOrganizations: string[];
   /** What the next device-code polls are answered with, in order. */
   readonly deviceAnswers: DeviceAnswer[];
+  /** The organization a device sign-in is approved for. */
+  approveIn: string;
+  readonly organizations: FakeOrganization[];
   /** The user agent of every MCP request, in order. */
   readonly userAgents: (string | undefined)[];
   /** The `x-agentrail-cli` header of every MCP request, in order. */
@@ -31,8 +53,14 @@ export interface FakeAgentrail {
   /** Access tokens the MCP server accepts, and refresh tokens still good. */
   readonly accessTokens: Set<string>;
   readonly refreshTokens: Set<string>;
+  /** The organization each token acts in; one not here acts in Acme. */
+  readonly organizationOf: Map<string, string>;
+  /** Refresh tokens a switch made, which cannot switch again. */
+  readonly switchedRefreshTokens: Set<string>;
   close(): Promise<void>;
 }
+
+const TOKEN_EXCHANGE = 'urn:ietf:params:oauth:grant-type:token-exchange';
 
 async function bodyOf(request: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
@@ -40,10 +68,26 @@ async function bodyOf(request: IncomingMessage): Promise<string> {
   return Buffer.concat(chunks).toString('utf8');
 }
 
-function agentrailServer(calls: FakeAgentrail['toolCalls']): McpServer {
+const WORKSPACES: Readonly<Record<string, { id: string; name: string }[]>> = {
+  [ACME]: [{ id: 'ws-acme', name: 'Acme' }],
+  [BETA]: [
+    { id: 'ws-beta', name: 'Beta' },
+    { id: 'ws-beta-docs', name: 'Beta docs' },
+  ],
+  [GAMMA]: [{ id: 'ws-gamma', name: 'Gamma' }],
+};
+
+function agentrailServer(
+  fake: Pick<
+    FakeAgentrail,
+    'toolCalls' | 'toolOrganizations' | 'organizations'
+  >,
+  organizationId: string,
+): McpServer {
   const server = new McpServer({ name: 'fake-agentrail', version: '0.0.0' });
   const record = (name: string, input: Record<string, unknown>) => {
-    calls.push({ name, input });
+    fake.toolCalls.push({ name, input });
+    fake.toolOrganizations.push(organizationId);
   };
   const reply = (summary: string, data: Record<string, unknown>) => ({
     content: [
@@ -51,6 +95,29 @@ function agentrailServer(calls: FakeAgentrail['toolCalls']): McpServer {
     ],
     structuredContent: data,
   });
+  const organization = fake.organizations.find(
+    (one) => one.id === organizationId,
+  );
+  server.registerTool(
+    'organizations_list',
+    {
+      title: 'List your organizations',
+      description: 'Lists your organizations.',
+      inputSchema: z.object({}),
+      annotations: { readOnlyHint: true },
+    },
+    (input) => {
+      record('organizations_list', input);
+      return reply(`${String(fake.organizations.length)} organizations.`, {
+        organizations: fake.organizations.map((one) => ({
+          id: one.id,
+          name: one.name,
+          current: one.id === organizationId,
+          agentAccess: one.agentAccess,
+        })),
+      });
+    },
+  );
   server.registerTool(
     'workspaces_list',
     {
@@ -64,11 +131,11 @@ function agentrailServer(calls: FakeAgentrail['toolCalls']): McpServer {
     },
     (input) => {
       record('workspaces_list', input);
-      return reply('1 workspace in Acme.', {
-        items: [{ id: 'ws-acme', name: 'Acme' }],
-        nextCursor: null,
-        defaultWorkspaceId: 'ws-acme',
-      });
+      const items = WORKSPACES[organizationId] ?? [];
+      return reply(
+        `${String(items.length)} workspace${items.length === 1 ? '' : 's'} in ${organization?.name ?? organizationId}.`,
+        { items, nextCursor: null, defaultWorkspaceId: items[0]?.id ?? '' },
+      );
     },
   );
   server.registerTool(
@@ -116,26 +183,56 @@ function agentrailServer(calls: FakeAgentrail['toolCalls']): McpServer {
   return server;
 }
 
-export async function startFakeAgentrail(): Promise<FakeAgentrail> {
+export async function startFakeAgentrail(
+  options: { signIn?: 'agentrail' | 'workos' } = {},
+): Promise<FakeAgentrail> {
+  const signIn = options.signIn ?? 'agentrail';
+  const paths =
+    signIn === 'agentrail'
+      ? {
+          device: '/oauth/device_authorization',
+          token: '/oauth/token',
+          revoke: '/oauth/revoke',
+        }
+      : {
+          device: '/oauth2/device_authorization',
+          token: '/oauth2/token',
+          revoke: undefined,
+        };
   let issued = 0;
   const fake = {
     deviceRequests: [] as URLSearchParams[],
     tokenRequests: [] as URLSearchParams[],
+    revocations: [] as URLSearchParams[],
     toolCalls: [] as FakeAgentrail['toolCalls'],
+    toolOrganizations: [] as string[],
     deviceAnswers: [] as DeviceAnswer[],
+    approveIn: ACME,
+    organizations: [
+      { id: ACME, name: 'Acme', agentAccess: true },
+      { id: BETA, name: 'Beta', agentAccess: true },
+      { id: GAMMA, name: 'Gamma', agentAccess: true },
+    ] as FakeOrganization[],
     userAgents: [] as (string | undefined)[],
     cliHeaders: [] as (string | undefined)[],
     refuseOutdatedCli: false,
     forbidden: undefined as FakeAgentrail['forbidden'],
     accessTokens: new Set<string>(),
     refreshTokens: new Set<string>(),
+    organizationOf: new Map<string, string>(),
+    switchedRefreshTokens: new Set<string>(),
   };
-  const issue = () => {
+  const organizationOf = (token: string) =>
+    fake.organizationOf.get(token) ?? ACME;
+  const issue = (organizationId: string, switched: boolean) => {
     issued += 1;
     const accessToken = `access-${String(issued)}`;
     const refreshToken = `refresh-${String(issued)}`;
     fake.accessTokens.add(accessToken);
     fake.refreshTokens.add(refreshToken);
+    fake.organizationOf.set(accessToken, organizationId);
+    fake.organizationOf.set(refreshToken, organizationId);
+    if (switched) fake.switchedRefreshTokens.add(refreshToken);
     return {
       access_token: accessToken,
       refresh_token: refreshToken,
@@ -143,10 +240,73 @@ export async function startFakeAgentrail(): Promise<FakeAgentrail> {
       expires_in: 3600,
     };
   };
-  const mcp = createMcpHandler(() => agentrailServer(fake.toolCalls), {
-    legacy: 'stateless',
-    responseMode: 'json',
-  });
+  const exchange = (form: URLSearchParams): [number, unknown] => {
+    if (signIn === 'workos') return [400, { error: 'unsupported_grant_type' }];
+    const subject = form.get('subject_token') ?? '';
+    if (
+      form.get('subject_token_type') !==
+        'urn:ietf:params:oauth:token-type:refresh_token' ||
+      form.get('client_id') !== 'client_test' ||
+      !fake.refreshTokens.has(subject)
+    ) {
+      return [
+        400,
+        {
+          error: 'invalid_grant',
+          error_description: 'grant request is invalid',
+        },
+      ];
+    }
+    if (fake.switchedRefreshTokens.has(subject)) {
+      return [
+        400,
+        {
+          error: 'invalid_grant',
+          error_description:
+            'This sign-in came from switching organization. Switch from the organization you signed in to, or run agentrail login.',
+        },
+      ];
+    }
+    const target = fake.organizations.find(
+      (one) => one.id === form.get('organization'),
+    );
+    if (target === undefined) {
+      return [
+        400,
+        {
+          error: 'invalid_grant',
+          error_description:
+            'You are not a member of that organization. Run agentrail org use to see yours.',
+        },
+      ];
+    }
+    if (!target.agentAccess) {
+      return [
+        400,
+        {
+          error: 'invalid_grant',
+          error_description:
+            'Agent access is off for that organization. Ask an Admin there to turn it back on.',
+        },
+      ];
+    }
+    if (organizationOf(subject) === target.id) {
+      return [
+        400,
+        {
+          error: 'invalid_request',
+          error_description: 'The CLI already acts in that organization.',
+        },
+      ];
+    }
+    return [
+      200,
+      {
+        ...issue(target.id, true),
+        issued_token_type: 'urn:ietf:params:oauth:token-type:access_token',
+      },
+    ];
+  };
 
   const http = createServer((request, response) => {
     void (async () => {
@@ -160,14 +320,18 @@ export async function startFakeAgentrail(): Promise<FakeAgentrail> {
         json(200, {
           resource: `${origin}/mcp`,
           authorization_servers: [origin],
+          ...(signIn === 'agentrail' ? { scopes_supported: ['mcp'] } : {}),
         });
       } else if (path === '/.well-known/oauth-authorization-server') {
         json(200, {
           issuer: origin,
-          device_authorization_endpoint: `${origin}/oauth2/device_authorization`,
-          token_endpoint: `${origin}/oauth2/token`,
+          device_authorization_endpoint: `${origin}${paths.device}`,
+          token_endpoint: `${origin}${paths.token}`,
+          ...(paths.revoke === undefined
+            ? {}
+            : { revocation_endpoint: `${origin}${paths.revoke}` }),
         });
-      } else if (path === '/oauth2/device_authorization') {
+      } else if (path === paths.device) {
         fake.deviceRequests.push(new URLSearchParams(await bodyOf(request)));
         json(200, {
           device_code: 'device-1',
@@ -177,21 +341,40 @@ export async function startFakeAgentrail(): Promise<FakeAgentrail> {
           expires_in: 300,
           interval: 5,
         });
-      } else if (path === '/oauth2/token') {
+      } else if (path === paths.token) {
         const form = new URLSearchParams(await bodyOf(request));
         fake.tokenRequests.push(form);
-        if (form.get('grant_type') === 'refresh_token') {
+        const grant = form.get('grant_type');
+        if (grant === 'refresh_token') {
           const presented = form.get('refresh_token') ?? '';
           if (!fake.refreshTokens.delete(presented)) {
             json(400, { error: 'invalid_grant' });
             return;
           }
-          json(200, issue());
+          json(
+            200,
+            issue(
+              organizationOf(presented),
+              fake.switchedRefreshTokens.has(presented),
+            ),
+          );
+          return;
+        }
+        if (grant === TOKEN_EXCHANGE) {
+          const [status, body] = exchange(form);
+          json(status, body);
           return;
         }
         const answer = fake.deviceAnswers.shift() ?? { error: 'expired_token' };
-        if (answer === 'tokens') json(200, issue());
+        if (answer === 'tokens') json(200, issue(fake.approveIn, false));
         else json(400, answer);
+      } else if (paths.revoke !== undefined && path === paths.revoke) {
+        const form = new URLSearchParams(await bodyOf(request));
+        fake.revocations.push(form);
+        fake.refreshTokens.delete(form.get('token') ?? '');
+        fake.accessTokens.delete(form.get('token') ?? '');
+        response.writeHead(200);
+        response.end();
       } else if (path === '/mcp') {
         const token = /^Bearer (.+)$/u.exec(
           request.headers.authorization ?? '',
@@ -231,6 +414,11 @@ export async function startFakeAgentrail(): Promise<FakeAgentrail> {
         for (const [name, value] of Object.entries(request.headers)) {
           if (typeof value === 'string') headers.set(name, value);
         }
+        // Each request's server acts in its token's organization.
+        const mcp = createMcpHandler(
+          () => agentrailServer(fake, organizationOf(token)),
+          { legacy: 'stateless', responseMode: 'json' },
+        );
         const answer = await mcp.fetch(
           new Request(`${origin}/mcp`, {
             method: request.method ?? 'POST',
@@ -250,9 +438,11 @@ export async function startFakeAgentrail(): Promise<FakeAgentrail> {
     http.listen(0, '127.0.0.1', resolve);
   });
   const { port } = http.address() as AddressInfo;
+  const origin = `http://127.0.0.1:${String(port)}`;
   // The same object the server reads, so a test's later settings take effect.
   return Object.assign(fake, {
-    mcpUrl: `http://127.0.0.1:${String(port)}/mcp`,
+    mcpUrl: `${origin}/mcp`,
+    tokenEndpoint: `${origin}${paths.token}`,
     close: () =>
       new Promise<void>((resolve) => {
         http.closeAllConnections();

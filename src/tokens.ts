@@ -13,7 +13,12 @@ export type TokenAnswer =
       readonly expiresInSeconds: number;
       readonly idToken: string | undefined;
     }
-  | { readonly kind: 'error'; readonly error: string };
+  | {
+      readonly kind: 'error';
+      readonly error: string;
+      /** The server's words for it, when it gave some (RFC 6749 §5.2). */
+      readonly description: string | undefined;
+    };
 
 /**
  * POSTs a form to an OAuth endpoint and returns its JSON object. OAuth errors
@@ -42,7 +47,14 @@ export async function requestTokens(
 ): Promise<TokenAnswer> {
   const { status, body } = await postForm(runtime, tokenEndpoint, form);
   if (typeof body.error === 'string') {
-    return { kind: 'error', error: body.error };
+    return {
+      kind: 'error',
+      error: body.error,
+      description:
+        typeof body.error_description === 'string'
+          ? body.error_description
+          : undefined,
+    };
   }
   if (
     status !== 200 ||
@@ -62,6 +74,29 @@ export async function requestTokens(
     expiresInSeconds: body.expires_in,
     idToken: typeof body.id_token === 'string' ? body.id_token : undefined,
   };
+}
+
+/**
+ * Ends a sign-in at the authorization server (RFC 7009). Agentrail ends the
+ * whole sign-in its token belongs to. Answers 200 for a token it no longer
+ * knows, so only another answer is a failure.
+ */
+export async function revokeToken(
+  runtime: Runtime,
+  revocationEndpoint: string,
+  form: { token: string; token_type_hint: string; client_id: string },
+): Promise<void> {
+  const answer = await send(runtime, revocationEndpoint, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams(form).toString(),
+  });
+  if (!answer.ok) {
+    throw new CliError(
+      EXIT.unavailable,
+      `${revocationEndpoint} answered ${String(answer.status)}.`,
+    );
+  }
 }
 
 /** The email an OpenID ID token names, for display only; never trusted. */

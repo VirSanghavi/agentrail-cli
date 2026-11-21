@@ -10,7 +10,7 @@ import { commandFor } from './credentials.js';
 import { clientIdOf, type Environment } from './environments.js';
 import { causeOf, CliError, EXIT } from './errors.js';
 import type { Runtime } from './runtime.js';
-import { accessToken } from './session.js';
+import { accessToken, type SignInUse } from './session.js';
 import { VERSION } from './version.js';
 
 /** A JSON Schema property, as far as the CLI reads one. */
@@ -132,16 +132,18 @@ function asCliError(
 /**
  * Connects to the environment's MCP server as the signed-in user, runs `use`,
  * and disconnects. The CLI is a connected app like any MCP host: it sees the
- * tools the user's role allows, and nothing else.
+ * tools the user's role allows in the organization its sign-in acts in, and
+ * nothing else.
  */
 export async function withServer<T>(
   runtime: Runtime,
   environment: Environment,
   use: (connection: Connection) => Promise<T>,
+  signIn: SignInUse = 'active',
 ): Promise<T> {
   // An environment that does not exist yet says so before anything else.
   clientIdOf(environment);
-  const token = await accessToken(runtime, environment);
+  const token = await accessToken(runtime, environment, signIn);
   const client = new Client({ name: 'agentrail-cli', version: VERSION });
   const transport = new StreamableHTTPClientTransport(
     new URL(environment.mcpUrl),

@@ -3,11 +3,13 @@ import { constants } from 'node:fs';
 import { access } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { delimiter, join } from 'node:path';
+import { createInterface } from 'node:readline/promises';
 
 import { Entry } from '@napi-rs/keyring';
 import type { CliSdk } from 'agentrail-cli-sdk';
 
 import { ENVIRONMENTS, type Environments } from './environments.js';
+import { CliError, EXIT } from './errors.js';
 import { instrument, withHeaders } from './instrumentation.js';
 
 /**
@@ -30,6 +32,12 @@ export interface Executed {
 export interface Stream {
   write(text: string): void;
   readonly isTTY: boolean;
+}
+
+/** One of the things a person picks from; one with a reason cannot be picked. */
+export interface Choice {
+  readonly label: string;
+  readonly unavailable?: string | undefined;
 }
 
 /**
@@ -57,6 +65,14 @@ export interface Runtime {
   readonly now: () => Date;
   readonly sleep: (milliseconds: number) => Promise<void>;
   readonly openBrowser: (url: string) => void;
+  /**
+   * Asks the person at the terminal to pick one of `choices`, and returns
+   * its index. Only ever called with a terminal (`stdinIsTTY`).
+   */
+  readonly choose: (
+    question: string,
+    choices: readonly Choice[],
+  ) => Promise<number>;
   /** Whether a program is on the PATH. */
   readonly hasCommand: (name: string) => Promise<boolean>;
   /** Runs a program directly, without a shell, and waits for it. */
@@ -120,6 +136,64 @@ function openInBrowser(url: string): void {
   const child = spawn(command, args, { stdio: 'ignore', detached: true });
   child.on('error', () => undefined);
   child.unref();
+}
+
+/** A numbered list on stderr, answered on stdin. */
+async function chooseInTerminal(
+  question: string,
+  choices: readonly Choice[],
+): Promise<number> {
+  const terminal = createInterface({
+    input: process.stdin,
+    output: process.stderr,
+  });
+  const cancelled = new AbortController();
+  terminal.on('SIGINT', () => {
+    cancelled.abort();
+  });
+  terminal.on('close', () => {
+    cancelled.abort();
+  });
+  try {
+    process.stderr.write(`${question}\n`);
+    choices.forEach((choice, index) => {
+      const reason =
+        choice.unavailable === undefined ? '' : ` (${choice.unavailable})`;
+      process.stderr.write(
+        `  ${String(index + 1)}. ${choice.label}${reason}\n`,
+      );
+    });
+    for (;;) {
+      let answer: string;
+      try {
+        answer = await terminal.question(
+          `Number (1-${String(choices.length)}): `,
+          { signal: cancelled.signal },
+        );
+      } catch (error) {
+        // Ctrl-C, or the input ended.
+        if (error instanceof Error && error.name === 'AbortError') {
+          throw new CliError(EXIT.usage, 'Nothing was chosen.', {
+            cause: error,
+          });
+        }
+        throw error;
+      }
+      const index = Number(answer.trim()) - 1;
+      const chosen = Number.isInteger(index) ? choices[index] : undefined;
+      if (chosen !== undefined && chosen.unavailable === undefined) {
+        return index;
+      }
+      process.stderr.write(
+        chosen === undefined
+          ? `Type a number from 1 to ${String(choices.length)}.\n`
+          : `${chosen.label} cannot be chosen: ${chosen.unavailable ?? ''}.\n`,
+      );
+    }
+  } finally {
+    terminal.removeAllListeners('close');
+    terminal.close();
+  }
 }
 
 async function onPath(name: string): Promise<boolean> {
@@ -190,6 +264,7 @@ export function processRuntime(): Runtime {
     sleep: (milliseconds) =>
       new Promise((resolve) => setTimeout(resolve, milliseconds)),
     openBrowser: openInBrowser,
+    choose: chooseInTerminal,
     hasCommand: onPath,
     exec: run,
   };
