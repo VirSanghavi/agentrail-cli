@@ -96,6 +96,13 @@ function commandWords(argv: readonly string[]): {
   return { words, env, help: argv.includes('--help') || argv.includes('-h') };
 }
 
+/** Names as a person says them: "A", "A and B", "A, B and C". */
+function spoken(names: readonly string[]): string {
+  return names.length <= 1
+    ? names.join('')
+    : `${names.slice(0, -1).join(', ')} and ${names.at(-1) ?? ''}`;
+}
+
 function globalsOf(command: Command): GlobalOptions {
   return command.optsWithGlobals<GlobalOptions>();
 }
@@ -304,10 +311,12 @@ function builtIns(program: Command, runtime: Runtime): void {
           ? `Not signed in to Agentrail ${environment.name}.`
           : `Signed out of Agentrail ${environment.name}: removed the sign-in from ${places.length === 0 ? 'this computer' : places.join(' and ')}.${others}${unchecked}`,
       );
-      if (result.endFailure !== undefined) {
+      if (result.notEnded !== undefined) {
+        const { organizations, reason } = result.notEnded;
+        const one = organizations.length === 1;
         throw new CliError(
           EXIT.unavailable,
-          `Agentrail ${environment.name} could not be told to end ${result.ended === 0 ? 'the sign-ins' : 'every sign-in'} (${result.endFailure}). They are gone from this computer; disconnect the Agentrail CLI in Agentrail's Settings to end them there.`,
+          `Agentrail ${environment.name} could not be told to end your sign-in${one ? '' : 's'} to ${spoken(organizations)}: ${reason} ${one ? 'It is' : 'They are'} gone from this computer; disconnect the Agentrail CLI in Agentrail's Settings of ${spoken(organizations)} to end ${one ? 'it' : 'them'} there.`,
         );
       }
     });

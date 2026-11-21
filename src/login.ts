@@ -6,6 +6,7 @@ import {
   type Credential,
   type Storage,
 } from './credentials.js';
+import { forgetCatalog } from './catalog.js';
 import { discoverSignIn } from './discovery.js';
 import {
   clientIdOf,
@@ -182,7 +183,17 @@ export async function completeDeviceLogin(
         browser: null,
         active: null,
       });
+      await forgetCatalog(runtime, environment);
       return credential;
+    }
+    if (answer.kind === 'gone') {
+      // The environment moved to another sign-in server since this sign-in
+      // started: the code means nothing there.
+      await removeFile(path);
+      throw new CliError(
+        EXIT.signIn,
+        `${pending.tokenEndpoint} no longer signs anyone in. Run ${retry} again.`,
+      );
     }
     switch (answer.error) {
       case 'authorization_pending':

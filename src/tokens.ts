@@ -18,7 +18,13 @@ export type TokenAnswer =
       readonly error: string;
       /** The server's words for it, when it gave some (RFC 6749 §5.2). */
       readonly description: string | undefined;
-    };
+    }
+  /**
+   * Nothing answers there any more (404 with no OAuth error): the
+   * environment moved to another sign-in server, as when Agentrail's own is
+   * switched back to WorkOS's, and a sign-in made at the old one has ended.
+   */
+  | { readonly kind: 'gone' };
 
 /**
  * POSTs a form to an OAuth endpoint and returns its JSON object. OAuth errors
@@ -46,6 +52,7 @@ export async function requestTokens(
   form: Record<string, string>,
 ): Promise<TokenAnswer> {
   const { status, body } = await postForm(runtime, tokenEndpoint, form);
+  if (status === 404 && body.error === undefined) return { kind: 'gone' };
   if (typeof body.error === 'string') {
     return {
       kind: 'error',

@@ -107,6 +107,14 @@ export async function activeOrganization(
   return recordBrowserOrganization(runtime, environment, organizations);
 }
 
+/** An environment whose sign-in server cannot switch organization. */
+function cannotSwitchYet(environment: Environment, target: Named): CliError {
+  return new CliError(
+    EXIT.refused,
+    `Agentrail ${environment.name} cannot switch organization yet. Run ${commandFor(environment, 'login')} and choose ${target.name} in your browser.`,
+  );
+}
+
 /** Why a switch was refused, as the person should read it. */
 function switchRefusal(
   environment: Environment,
@@ -115,14 +123,9 @@ function switchRefusal(
 ): CliError {
   const login = commandFor(environment, 'login');
   switch (answer.error) {
-    // WorkOS's AuthKit, before an environment moves to Agentrail's own
-    // sign-in, knows no organization switch.
     case 'unsupported_grant_type':
     case 'unauthorized_client':
-      return new CliError(
-        EXIT.refused,
-        `Agentrail ${environment.name} cannot switch organization yet. Run ${login} and choose ${target.name} in your browser.`,
-      );
+      return cannotSwitchYet(environment, target);
     case 'invalid_grant':
       return new CliError(
         EXIT.signIn,
@@ -162,6 +165,17 @@ async function exchangeInto(
       );
     }
     const { credential, storage } = stored;
+    // Agentrail's own sign-in server is on the MCP host: its issuer is the
+    // MCP server's origin (argus apps/api/src/adapters/oauth-server/
+    // provider.ts). A sign-in from any other server, WorkOS's AuthKit
+    // among them, is not one Agentrail exchanges for another
+    // organization's, so nothing is sent to it.
+    if (
+      new URL(credential.tokenEndpoint).origin !==
+      new URL(environment.mcpUrl).origin
+    ) {
+      throw cannotSwitchYet(environment, target);
+    }
     if (credential.refreshToken === undefined) {
       throw new CliError(
         EXIT.signIn,
@@ -176,6 +190,12 @@ async function exchangeInto(
       organization: target.id,
       resource: credential.resource,
     });
+    if (answer.kind === 'gone') {
+      throw new CliError(
+        EXIT.signIn,
+        `Your sign-in to Agentrail ${environment.name} has ended. Run ${login}.`,
+      );
+    }
     if (answer.kind === 'error') {
       throw switchRefusal(environment, target, answer);
     }
@@ -204,8 +224,17 @@ export async function switchOrganization(
   target: Named,
 ): Promise<Switched> {
   const signIns = await loadSignIns(runtime, environment);
-  const active = signIns.active ?? signIns.browser?.id;
-  if (active === target.id) return 'already';
+  // Already there only with a sign-in to use: a switched one gone from this
+  // computer is made again.
+  if (signIns.active === null && signIns.browser?.id === target.id) {
+    return 'already';
+  }
+  if (
+    signIns.active === target.id &&
+    (await loadCredential(runtime, environment, target.id)) !== undefined
+  ) {
+    return 'already';
+  }
   let next: SignIns;
   let switched: Switched = 'kept';
   if (signIns.browser?.id === target.id) {

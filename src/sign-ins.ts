@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 
-import { commandFor } from './credentials.js';
+import { commandFor, deleteCredential } from './credentials.js';
 import type { Environment } from './environments.js';
 import { CliError, EXIT } from './errors.js';
 import { readJson, removeFile, writePrivateJson } from './files.js';
@@ -126,6 +126,35 @@ export async function replaceSignIns(
     Object.keys(signIns.workspaces).length === 0;
   if (empty) await removeFile(signInsPath(runtime, environment));
   else await saveSignIns(runtime, environment, signIns);
+}
+
+/**
+ * Forgets a sign-in made by switching that Agentrail no longer accepts, or
+ * that is gone from this computer: commands act in the browser sign-in's
+ * organization again, and `org use` signs in to this one afresh. Returns
+ * the message that says so, naming that command.
+ */
+export async function forgetSwitched(
+  runtime: Runtime,
+  environment: Environment,
+  organizationId: string,
+  what: (name: string) => string,
+): Promise<string> {
+  const removal = await deleteCredential(runtime, environment, organizationId);
+  const signIns = await loadSignIns(runtime, environment);
+  const name =
+    signIns.switched.find((one) => one.id === organizationId)?.name ??
+    organizationId;
+  await saveSignIns(runtime, environment, {
+    ...signIns,
+    active: signIns.active === organizationId ? null : signIns.active,
+    switched: signIns.switched.filter((one) => one.id !== organizationId),
+  });
+  const unchecked =
+    removal.keychainFailure === undefined || removal.file
+      ? ''
+      : ` Could not check the OS keychain for it (${removal.keychainFailure}).`;
+  return `${what(name)} Run ${commandFor(environment, `org use ${organizationId}`)} to sign in to ${name} again.${unchecked}`;
 }
 
 /** The organization commands act in, when the CLI knows it without asking. */

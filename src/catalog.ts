@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 
 import type { Environment } from './environments.js';
@@ -28,6 +28,18 @@ export interface Catalog {
 
 function cachePath(runtime: Runtime, environment: Environment): string {
   return join(runtime.configDir, 'catalog', `${environment.name}.json`);
+}
+
+/**
+ * Drops the kept tool list once commands act in another organization (a
+ * switch, or a login that approved another): the role, and so the tools,
+ * can differ there.
+ */
+export async function forgetCatalog(
+  runtime: Runtime,
+  environment: Environment,
+): Promise<void> {
+  await rm(cachePath(runtime, environment), { force: true });
 }
 
 /** The kept catalog. One cut short or of another shape counts as none. */

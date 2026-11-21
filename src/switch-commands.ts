@@ -1,8 +1,6 @@
-import { rm } from 'node:fs/promises';
-import { join } from 'node:path';
-
 import type { Command } from 'commander';
 
+import { forgetCatalog } from './catalog.js';
 import { commandFor } from './credentials.js';
 import type { Environment } from './environments.js';
 import { CliError, EXIT } from './errors.js';
@@ -96,16 +94,6 @@ async function pick<T extends Named>(
   return chosen;
 }
 
-/** Commands keep a sign-in's tools for ten minutes; another organization's role may differ. */
-async function forgetCatalog(
-  runtime: Runtime,
-  environment: Environment,
-): Promise<void> {
-  await rm(join(runtime.configDir, 'catalog', `${environment.name}.json`), {
-    force: true,
-  });
-}
-
 /** A token handed in acts in its own organization, and nothing switches it. */
 function refuseGivenToken(runtime: Runtime, instead: string): void {
   if (runtime.env.AGENTRAIL_TOKEN) {
@@ -138,10 +126,30 @@ function addOrganizationCommands(program: Command, context: Context): void {
         const environment = context.environmentOf(self);
         refuseGivenToken(runtime, 'Unset it to switch organization.');
         const use = commandFor(environment, 'org use');
+        let listed: ListedOrganization[] | undefined;
+        const listOnce = async () => {
+          if (listed === undefined) {
+            listed = await withServer(
+              runtime,
+              environment,
+              listOrganizations,
+              'browser',
+            );
+            await recordBrowserOrganization(runtime, environment, listed);
+          }
+          return listed;
+        };
+        // After a login the CLI has not yet asked which organization the
+        // browser sign-in acts in. It is asked first, so a sign-in kept from
+        // switching to that same organization never wins over the new one.
+        if ((await loadSignIns(runtime, environment)).browser === null) {
+          await listOnce();
+        }
         const signIns = await loadSignIns(runtime, environment);
+        const { browser } = signIns;
         const kept = [
-          ...(signIns.browser === null ? [] : [signIns.browser]),
-          ...signIns.switched,
+          ...(browser === null ? [] : [browser]),
+          ...signIns.switched.filter((one) => one.id !== browser?.id),
         ];
         // An organization with a kept sign-in is switched to with no request.
         let target: Named | undefined =
@@ -149,13 +157,7 @@ function addOrganizationCommands(program: Command, context: Context): void {
             ? undefined
             : findNamed(kept, wanted, 'organization', use);
         if (target === undefined) {
-          const organizations = await withServer(
-            runtime,
-            environment,
-            listOrganizations,
-            'browser',
-          );
-          await recordBrowserOrganization(runtime, environment, organizations);
+          const organizations = await listOnce();
           const unavailable = (one: ListedOrganization) =>
             one.agentAccess ? undefined : AGENT_ACCESS_OFF;
           const listed =

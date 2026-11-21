@@ -1,4 +1,9 @@
-import { createServer, type IncomingMessage } from 'node:http';
+import {
+  createServer,
+  type IncomingMessage,
+  type Server,
+  type ServerResponse,
+} from 'node:http';
 import type { AddressInfo } from 'node:net';
 
 import { McpServer, createMcpHandler } from '@modelcontextprotocol/server';
@@ -25,8 +30,12 @@ export const GAMMA = '2d8b6e0a-3f4c-4b5d-9e7f-9a0b1c2d3e4f';
  * It records what the CLI sent.
  *
  * `agentrail` is Agentrail's own sign-in server on the MCP host, which names
- * its scope and switches organization by token exchange. `workos` is the
- * shape of WorkOS's AuthKit, which an environment can be switched back to.
+ * its scope and switches organization by token exchange. `workos` is
+ * WorkOS's AuthKit, which an environment can be switched back to: on an
+ * origin of its own, with the metadata AuthKit publishes (2026-11-21: a
+ * revocation endpoint taking public clients, and token exchange among its
+ * grants). What it answers an exchange from the CLI is not known, and the
+ * CLI never sends one.
  */
 export interface FakeAgentrail {
   readonly mcpUrl: string;
@@ -205,8 +214,10 @@ export async function startFakeAgentrail(
       : {
           device: '/oauth2/device_authorization',
           token: '/oauth2/token',
-          revoke: undefined,
+          revoke: '/oauth2/revoke',
         };
+  // AuthKit is not on the MCP host; Agentrail's own sign-in server is.
+  let authorizationOrigin = '';
   let issued = 0;
   const fake = {
     deviceRequests: [] as URLSearchParams[],
@@ -249,7 +260,7 @@ export async function startFakeAgentrail(
     };
   };
   const exchange = (form: URLSearchParams): [number, unknown] => {
-    if (signIn === 'workos') return [400, { error: 'unsupported_grant_type' }];
+    if (signIn === 'workos') return [400, { error: 'invalid_request' }];
     const subject = form.get('subject_token') ?? '';
     if (
       form.get('subject_token_type') !==
@@ -316,7 +327,7 @@ export async function startFakeAgentrail(
     ];
   };
 
-  const http = createServer((request, response) => {
+  const handle = (request: IncomingMessage, response: ServerResponse) => {
     void (async () => {
       const origin = `http://${String(request.headers.host)}`;
       const path = request.url ?? '/';
@@ -327,7 +338,7 @@ export async function startFakeAgentrail(
       if (path === '/.well-known/oauth-protected-resource/mcp') {
         json(200, {
           resource: `${origin}/mcp`,
-          authorization_servers: [origin],
+          authorization_servers: [authorizationOrigin || origin],
           ...(signIn === 'agentrail' ? { scopes_supported: ['mcp'] } : {}),
         });
       } else if (path === '/.well-known/oauth-authorization-server') {
@@ -335,9 +346,14 @@ export async function startFakeAgentrail(
           issuer: origin,
           device_authorization_endpoint: `${origin}${paths.device}`,
           token_endpoint: `${origin}${paths.token}`,
-          ...(paths.revoke === undefined
-            ? {}
-            : { revocation_endpoint: `${origin}${paths.revoke}` }),
+          revocation_endpoint: `${origin}${paths.revoke}`,
+          revocation_endpoint_auth_methods_supported: ['none'],
+          grant_types_supported: [
+            'authorization_code',
+            'refresh_token',
+            'urn:ietf:params:oauth:grant-type:device_code',
+            TOKEN_EXCHANGE,
+          ],
         });
       } else if (path === paths.device) {
         fake.deviceRequests.push(new URLSearchParams(await bodyOf(request)));
@@ -376,7 +392,7 @@ export async function startFakeAgentrail(
         const answer = fake.deviceAnswers.shift() ?? { error: 'expired_token' };
         if (answer === 'tokens') json(200, issue(fake.approveIn, false));
         else json(400, answer);
-      } else if (paths.revoke !== undefined && path === paths.revoke) {
+      } else if (path === paths.revoke) {
         const form = new URLSearchParams(await bodyOf(request));
         fake.revocations.push(form);
         fake.refreshTokens.delete(form.get('token') ?? '');
@@ -441,22 +457,33 @@ export async function startFakeAgentrail(
         json(404, { error: 'not_found' });
       }
     })();
-  });
-  await new Promise<void>((resolve) => {
-    http.listen(0, '127.0.0.1', resolve);
-  });
-  const { port } = http.address() as AddressInfo;
-  const origin = `http://127.0.0.1:${String(port)}`;
+  };
+  const http = createServer(handle);
+  const listen = async (server: Server): Promise<string> => {
+    await new Promise<void>((resolve) => {
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    const { port } = server.address() as AddressInfo;
+    return `http://127.0.0.1:${String(port)}`;
+  };
+  const origin = await listen(http);
+  // AuthKit's own origin answers the same paths, but only its own are asked.
+  const authKit = signIn === 'workos' ? createServer(handle) : undefined;
+  if (authKit !== undefined) authorizationOrigin = await listen(authKit);
+  const stop = (server: Server) =>
+    new Promise<void>((resolve) => {
+      server.closeAllConnections();
+      server.close(() => {
+        resolve();
+      });
+    });
   // The same object the server reads, so a test's later settings take effect.
   return Object.assign(fake, {
     mcpUrl: `${origin}/mcp`,
-    tokenEndpoint: `${origin}${paths.token}`,
-    close: () =>
-      new Promise<void>((resolve) => {
-        http.closeAllConnections();
-        http.close(() => {
-          resolve();
-        });
-      }),
+    tokenEndpoint: `${authorizationOrigin || origin}${paths.token}`,
+    close: async () => {
+      await stop(http);
+      if (authKit !== undefined) await stop(authKit);
+    },
   });
 }

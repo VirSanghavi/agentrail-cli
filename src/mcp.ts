@@ -11,6 +11,7 @@ import { clientIdOf, type Environment } from './environments.js';
 import { causeOf, CliError, EXIT } from './errors.js';
 import type { Runtime } from './runtime.js';
 import { accessToken, type SignInUse } from './session.js';
+import { forgetSwitched } from './sign-ins.js';
 import { VERSION } from './version.js';
 
 /** A JSON Schema property, as far as the CLI reads one. */
@@ -84,12 +85,33 @@ function refusalOf(error: SdkHttpError): string {
 }
 
 /** What a failure talking to the server means for the person running us. */
-function asCliError(
+async function asCliError(
   error: unknown,
   runtime: Runtime,
   environment: Environment,
-): unknown {
+  organizationId: string | undefined,
+): Promise<unknown> {
   if (error instanceof CliError) return error;
+  // A switched organization's sign-in Agentrail refuses has ended there (an
+  // Admin there disconnected the CLI): forgotten, so `org use` makes a new
+  // one rather than finding this one again.
+  if (
+    error instanceof SdkHttpError &&
+    error.status === 401 &&
+    organizationId !== undefined
+  ) {
+    return new CliError(
+      EXIT.signIn,
+      await forgetSwitched(
+        runtime,
+        environment,
+        organizationId,
+        (name) =>
+          `Agentrail ${environment.name} no longer accepts your sign-in to ${name}.`,
+      ),
+      { cause: error },
+    );
+  }
   if (error instanceof SdkHttpError && error.status === 401) {
     return new CliError(
       EXIT.signIn,
@@ -143,7 +165,11 @@ export async function withServer<T>(
 ): Promise<T> {
   // An environment that does not exist yet says so before anything else.
   clientIdOf(environment);
-  const token = await accessToken(runtime, environment, signIn);
+  const { token, organizationId } = await accessToken(
+    runtime,
+    environment,
+    signIn,
+  );
   const client = new Client({ name: 'agentrail-cli', version: VERSION });
   const transport = new StreamableHTTPClientTransport(
     new URL(environment.mcpUrl),
@@ -187,7 +213,7 @@ export async function withServer<T>(
     await client.connect(transport);
     return await use(connection);
   } catch (error) {
-    throw asCliError(error, runtime, environment);
+    throw await asCliError(error, runtime, environment, organizationId);
   } finally {
     await client.close();
   }

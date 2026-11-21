@@ -8,7 +8,7 @@ import type { Environment } from './environments.js';
 import { CliError, EXIT } from './errors.js';
 import { withLock } from './lock.js';
 import type { Runtime } from './runtime.js';
-import { loadSignIns } from './sign-ins.js';
+import { forgetSwitched, loadSignIns } from './sign-ins.js';
 import { credentialFrom, requestTokens } from './tokens.js';
 
 /** Refreshed this long before it expires, so a call never starts stale. */
@@ -91,11 +91,11 @@ async function refresh(
       client_id: credential.clientId,
       resource: credential.resource,
     });
-    if (answer.kind === 'error') {
+    if (answer.kind === 'gone' || answer.kind === 'error') {
       // Another command refreshed first: each refresh token is accepted
       // once, so this one is spent, and the sign-in that command stored is
       // fresh.
-      if (answer.error === 'invalid_grant') {
+      if (answer.kind === 'error' && answer.error === 'invalid_grant') {
         const other = await refreshedElsewhere(
           runtime,
           environment,
@@ -104,9 +104,25 @@ async function refresh(
         );
         if (other !== undefined) return other.accessToken;
       }
+      const why =
+        answer.kind === 'gone' ? 'ended' : `expired (${answer.error})`;
+      // A switched organization's sign-in that has ended is forgotten, so
+      // `org use` makes a new one rather than finding this one again.
+      if (organizationId !== undefined) {
+        throw new CliError(
+          EXIT.signIn,
+          await forgetSwitched(
+            runtime,
+            environment,
+            organizationId,
+            (name) =>
+              `Your sign-in to ${name} in Agentrail ${environment.name} ${why}.`,
+          ),
+        );
+      }
       throw new CliError(
         EXIT.signIn,
-        `Your sign-in to ${environment.name} expired (${answer.error}). Run ${login}.`,
+        `Your sign-in to ${environment.name} ${why}. Run ${login}.`,
       );
     }
     // RFC 6749 §6: a new refresh token replaces the old one; without one,
@@ -133,6 +149,13 @@ async function refresh(
   });
 }
 
+/** A command's access token, and the switched organization it is for. */
+export interface SignInToken {
+  readonly token: string;
+  /** Undefined for `AGENTRAIL_TOKEN` and for the browser sign-in. */
+  readonly organizationId: string | undefined;
+}
+
 /**
  * The access token for a command. `AGENTRAIL_TOKEN` wins and is never
  * written anywhere (CLI-007); otherwise the stored sign-in for the
@@ -142,9 +165,9 @@ export async function accessToken(
   runtime: Runtime,
   environment: Environment,
   use: SignInUse = 'active',
-): Promise<string> {
+): Promise<SignInToken> {
   const given = runtime.env.AGENTRAIL_TOKEN;
-  if (given) return given;
+  if (given) return { token: given, organizationId: undefined };
 
   const signIns = await loadSignIns(runtime, environment);
   const organizationId =
@@ -152,12 +175,15 @@ export async function accessToken(
   const stored = await loadCredential(runtime, environment, organizationId);
   if (!stored) {
     if (organizationId !== undefined) {
-      const name =
-        signIns.switched.find((one) => one.id === organizationId)?.name ??
-        organizationId;
       throw new CliError(
         EXIT.signIn,
-        `Not signed in to ${name} in Agentrail ${environment.name}. Run ${commandFor(environment, `org use ${organizationId}`)} to switch to it again, or ${commandFor(environment, 'login')}.`,
+        await forgetSwitched(
+          runtime,
+          environment,
+          organizationId,
+          (name) =>
+            `Not signed in to ${name} in Agentrail ${environment.name}.`,
+        ),
       );
     }
     throw new CliError(
@@ -165,6 +191,8 @@ export async function accessToken(
       `Not signed in to Agentrail ${environment.name}. Run ${commandFor(environment, 'login')}.`,
     );
   }
-  if (fresh(runtime, stored.credential)) return stored.credential.accessToken;
-  return refresh(runtime, environment, organizationId);
+  const token = fresh(runtime, stored.credential)
+    ? stored.credential.accessToken
+    : await refresh(runtime, environment, organizationId);
+  return { token, organizationId };
 }

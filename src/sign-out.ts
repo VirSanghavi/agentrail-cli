@@ -6,7 +6,7 @@ import {
 } from './credentials.js';
 import { discoverSignIn } from './discovery.js';
 import type { Environment } from './environments.js';
-import { causeOf, CliError } from './errors.js';
+import { CliError } from './errors.js';
 import type { Runtime } from './runtime.js';
 import { replaceSignIns, signInsToReplace } from './sign-ins.js';
 import { revokeToken } from './tokens.js';
@@ -19,8 +19,16 @@ export interface SignOut {
   readonly switched: number;
   /** How many sign-ins Agentrail ended. */
   readonly ended: number;
-  /** Why some could not be ended, when some could not. */
-  readonly endFailure: string | undefined;
+  /** The organizations whose sign-ins Agentrail could not be told to end, and why. */
+  readonly notEnded:
+    | { readonly organizations: readonly string[]; readonly reason: string }
+    | undefined;
+}
+
+/** A sign-in to end, with the organization it acts in as the person knows it. */
+interface ToEnd {
+  readonly organization: string;
+  readonly credential: Credential;
 }
 
 /** The credential, or undefined where it cannot be read: removing it still is. */
@@ -40,24 +48,42 @@ async function readable(
   }
 }
 
-/** Ends each sign-in at Agentrail (RFC 7009), so a copy of its token is worth nothing. */
+/**
+ * Ends each sign-in at Agentrail (RFC 7009), so a copy of its token is worth
+ * nothing. Each is tried, whatever happened to the one before.
+ */
 async function endAll(
   runtime: Runtime,
   environment: Environment,
-  credentials: readonly Credential[],
-): Promise<{ ended: number; failure: string | undefined }> {
-  if (credentials.length === 0) return { ended: 0, failure: undefined };
-  let ended = 0;
+  toEnd: readonly ToEnd[],
+): Promise<Pick<SignOut, 'ended' | 'notEnded'>> {
+  if (toEnd.length === 0) return { ended: 0, notEnded: undefined };
+  let revocationEndpoint: string | undefined;
   try {
-    const { revocationEndpoint } = await discoverSignIn(
+    ({ revocationEndpoint } = await discoverSignIn(
       runtime,
       environment.mcpUrl,
-    );
-    // WorkOS's AuthKit offers none: its sign-ins end when disconnected in
-    // Agentrail's Settings.
-    if (revocationEndpoint === undefined) return { ended, failure: undefined };
-    for (const credential of credentials) {
-      const refresh = credential.refreshToken;
+    ));
+  } catch (error) {
+    if (!(error instanceof CliError)) throw error;
+    return {
+      ended: 0,
+      notEnded: {
+        organizations: toEnd.map((one) => one.organization),
+        reason: error.message,
+      },
+    };
+  }
+  // RFC 8414 makes revocation optional: a server without it ends a sign-in
+  // when the CLI is disconnected in Agentrail's Settings.
+  if (revocationEndpoint === undefined)
+    return { ended: 0, notEnded: undefined };
+  let ended = 0;
+  const failed: string[] = [];
+  let reason: string | undefined;
+  for (const { organization, credential } of toEnd) {
+    const refresh = credential.refreshToken;
+    try {
       await revokeToken(runtime, revocationEndpoint, {
         token: refresh ?? credential.accessToken,
         token_type_hint:
@@ -65,12 +91,17 @@ async function endAll(
         client_id: credential.clientId,
       });
       ended += 1;
+    } catch (error) {
+      if (!(error instanceof CliError)) throw error;
+      failed.push(organization);
+      reason ??= error.message;
     }
-    return { ended, failure: undefined };
-  } catch (error) {
-    if (error instanceof CliError) return { ended, failure: causeOf(error) };
-    throw error;
   }
+  return {
+    ended,
+    notEnded:
+      reason === undefined ? undefined : { organizations: failed, reason },
+  };
 }
 
 /**
@@ -85,15 +116,21 @@ export async function signOut(
 ): Promise<SignOut> {
   const signIns = await signInsToReplace(runtime, environment);
   const organizations = [
-    undefined,
-    ...signIns.switched.map((organization) => organization.id),
+    {
+      id: undefined,
+      name:
+        signIns.browser?.name ??
+        'the organization you approved in your browser',
+    },
+    ...signIns.switched,
   ];
-  const credentials: Credential[] = [];
-  for (const organizationId of organizations) {
-    const credential = await readable(runtime, environment, organizationId);
-    if (credential !== undefined) credentials.push(credential);
+  const toEnd: ToEnd[] = [];
+  for (const { id, name } of organizations) {
+    const credential = await readable(runtime, environment, id);
+    if (credential !== undefined)
+      toEnd.push({ organization: name, credential });
   }
-  const { ended, failure } = await endAll(runtime, environment, credentials);
+  const { ended, notEnded } = await endAll(runtime, environment, toEnd);
 
   const browser = await deleteCredential(runtime, environment);
   let switched = 0;
@@ -111,5 +148,5 @@ export async function signOut(
     switched: [],
     workspaces: signIns.workspaces,
   });
-  return { browser, switched, ended, endFailure: failure };
+  return { browser, switched, ended, notEnded };
 }
