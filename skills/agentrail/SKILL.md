@@ -21,8 +21,14 @@ an agent reaches for, recommends, or succeeds with. You reach it through the
 - Commands come from Agentrail itself. Run `agentrail tools` to see every
   command your role can use, and `agentrail <area> <action> --help` for one
   command's inputs. Do not guess a command or a flag.
-- Commands act in the user's default workspace unless the directory is linked
-  (`agentrail link <workspaceId>`) or you pass `--workspace <id>`;
+- Commands act in one of the user's organizations: `agentrail org current`
+  names it. Switch with `agentrail org use <id or name>` only when the user
+  asks for another organization; `agentrail organizations list` shows theirs.
+  It needs no browser, and without a name it lists them instead of asking.
+- Commands act in the user's default workspace unless you pass
+  `--workspace <id>`, the directory is linked (`agentrail link
+<workspaceId>`), or `agentrail workspace use <id or name>` chose one for the
+  organization; `agentrail workspace current` says which, and
   `agentrail workspaces list` shows the workspaces.
 
 ## Workflows

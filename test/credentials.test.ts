@@ -43,7 +43,7 @@ function expiring(overrides: Partial<Credential> = {}): Credential {
     accessToken: 'access-old',
     refreshToken: 'refresh-old',
     expiresAt: new Date(Date.now() + 30_000).toISOString(),
-    tokenEndpoint: new URL('/oauth2/token', agentrail.mcpUrl).href,
+    tokenEndpoint: agentrail.tokenEndpoint,
     clientId: 'client_test',
     resource: agentrail.mcpUrl,
     email: 'person@example.com',

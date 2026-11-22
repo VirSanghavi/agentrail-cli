@@ -6,7 +6,9 @@ import {
 } from './credentials.js';
 import type { Environment } from './environments.js';
 import { CliError, EXIT } from './errors.js';
+import { withLock } from './lock.js';
 import type { Runtime } from './runtime.js';
+import { forgetSwitched, loadSignIns } from './sign-ins.js';
 import { credentialFrom, requestTokens } from './tokens.js';
 
 /** Refreshed this long before it expires, so a call never starts stale. */
@@ -16,17 +18,41 @@ const RACE_CHECKS = 5;
 const RACE_CHECK_EVERY_MS = 200;
 
 /**
- * The sign-in another command stored after refreshing with `spent` first.
- * That command stores it once its own answer arrives, which can be a moment
- * after this one's, so the store is read again for a second before giving up.
+ * Which sign-in a command uses: the one for the organization commands act
+ * in, or the one the person approved in the browser, which alone may switch
+ * organization.
+ */
+export type SignInUse = 'active' | 'browser';
+
+/** The lock a sign-in's refresh token is used under (`lock.ts`). */
+export function lockOf(
+  environment: Environment,
+  organizationId: string | undefined,
+): string {
+  return organizationId === undefined
+    ? environment.name
+    : `${environment.name}-${organizationId}`;
+}
+
+function fresh(runtime: Runtime, credential: Credential): boolean {
+  const expiresAt = new Date(credential.expiresAt).getTime();
+  return expiresAt - runtime.now().getTime() > REFRESH_MARGIN_MS;
+}
+
+/**
+ * The sign-in a command that does not hold the lock stored after refreshing
+ * with `spent` first: a CLI before 0.2 refreshes without it. That command
+ * stores it once its own answer arrives, which can be a moment after this
+ * one's, so the store is read again for a second before giving up.
  */
 async function refreshedElsewhere(
   runtime: Runtime,
   environment: Environment,
+  organizationId: string | undefined,
   spent: string,
 ): Promise<Credential | undefined> {
   for (let check = 1; ; check += 1) {
-    const stored = await loadCredential(runtime, environment);
+    const stored = await loadCredential(runtime, environment, organizationId);
     if (stored !== undefined && stored.credential.refreshToken !== spent) {
       return stored.credential;
     }
@@ -35,74 +61,138 @@ async function refreshedElsewhere(
   }
 }
 
+/** Refreshes a stored sign-in, holding its lock. */
+async function refresh(
+  runtime: Runtime,
+  environment: Environment,
+  organizationId: string | undefined,
+): Promise<string> {
+  const login = commandFor(environment, 'login');
+  return withLock(runtime, lockOf(environment, organizationId), async () => {
+    // Another command may have refreshed it while this one waited.
+    const stored = await loadCredential(runtime, environment, organizationId);
+    if (!stored) {
+      throw new CliError(
+        EXIT.signIn,
+        `Not signed in to Agentrail ${environment.name}. Run ${login}.`,
+      );
+    }
+    const { credential, storage } = stored;
+    if (fresh(runtime, credential)) return credential.accessToken;
+    if (credential.refreshToken === undefined) {
+      throw new CliError(
+        EXIT.signIn,
+        `Your sign-in to ${environment.name} expired. Run ${login}.`,
+      );
+    }
+    const answer = await requestTokens(runtime, credential.tokenEndpoint, {
+      grant_type: 'refresh_token',
+      refresh_token: credential.refreshToken,
+      client_id: credential.clientId,
+      resource: credential.resource,
+    });
+    if (answer.kind === 'gone' || answer.kind === 'error') {
+      // Another command refreshed first: each refresh token is accepted
+      // once, so this one is spent, and the sign-in that command stored is
+      // fresh.
+      if (answer.kind === 'error' && answer.error === 'invalid_grant') {
+        const other = await refreshedElsewhere(
+          runtime,
+          environment,
+          organizationId,
+          credential.refreshToken,
+        );
+        if (other !== undefined) return other.accessToken;
+      }
+      const why =
+        answer.kind === 'gone' ? 'ended' : `expired (${answer.error})`;
+      // A switched organization's sign-in that has ended is forgotten, so
+      // `org use` makes a new one rather than finding this one again.
+      if (organizationId !== undefined) {
+        throw new CliError(
+          EXIT.signIn,
+          await forgetSwitched(
+            runtime,
+            environment,
+            organizationId,
+            (name) =>
+              `Your sign-in to ${name} in Agentrail ${environment.name} ${why}.`,
+          ),
+        );
+      }
+      throw new CliError(
+        EXIT.signIn,
+        `Your sign-in to ${environment.name} ${why}. Run ${login}.`,
+      );
+    }
+    // RFC 6749 §6: a new refresh token replaces the old one; without one,
+    // the old one stays good.
+    const tokens = {
+      ...answer,
+      refreshToken: answer.refreshToken ?? credential.refreshToken,
+    };
+    const refreshed = credentialFrom(runtime, tokens, {
+      environment: environment.name,
+      tokenEndpoint: credential.tokenEndpoint,
+      clientId: credential.clientId,
+      resource: credential.resource,
+      email: credential.email,
+    });
+    await saveCredential(
+      runtime,
+      environment,
+      refreshed,
+      storage,
+      organizationId,
+    );
+    return refreshed.accessToken;
+  });
+}
+
+/** A command's access token, and the switched organization it is for. */
+export interface SignInToken {
+  readonly token: string;
+  /** Undefined for `AGENTRAIL_TOKEN` and for the browser sign-in. */
+  readonly organizationId: string | undefined;
+}
+
 /**
  * The access token for a command. `AGENTRAIL_TOKEN` wins and is never
- * written anywhere (CLI-007); otherwise the stored sign-in, refreshed when it
- * is about to expire.
+ * written anywhere (CLI-007); otherwise the stored sign-in for the
+ * organization commands act in, refreshed when it is about to expire.
  */
 export async function accessToken(
   runtime: Runtime,
   environment: Environment,
-): Promise<string> {
+  use: SignInUse = 'active',
+): Promise<SignInToken> {
   const given = runtime.env.AGENTRAIL_TOKEN;
-  if (given) return given;
+  if (given) return { token: given, organizationId: undefined };
 
-  const login = commandFor(environment, 'login');
-  const stored = await loadCredential(runtime, environment);
+  const signIns = await loadSignIns(runtime, environment);
+  const organizationId =
+    use === 'active' ? (signIns.active ?? undefined) : undefined;
+  const stored = await loadCredential(runtime, environment, organizationId);
   if (!stored) {
-    throw new CliError(
-      EXIT.signIn,
-      `Not signed in to Agentrail ${environment.name}. Run ${login}.`,
-    );
-  }
-  const { credential, storage } = stored;
-  const expiresAt = new Date(credential.expiresAt).getTime();
-  if (expiresAt - runtime.now().getTime() > REFRESH_MARGIN_MS) {
-    return credential.accessToken;
-  }
-  if (credential.refreshToken === undefined) {
-    throw new CliError(
-      EXIT.signIn,
-      `Your sign-in to ${environment.name} expired. Run ${login}.`,
-    );
-  }
-
-  const answer = await requestTokens(runtime, credential.tokenEndpoint, {
-    grant_type: 'refresh_token',
-    refresh_token: credential.refreshToken,
-    client_id: credential.clientId,
-    resource: credential.resource,
-  });
-  if (answer.kind === 'error') {
-    // Another command refreshed first: WorkOS accepts each refresh token
-    // once, so this one is spent, and the sign-in that command stored is
-    // fresh.
-    if (answer.error === 'invalid_grant') {
-      const fresh = await refreshedElsewhere(
-        runtime,
-        environment,
-        credential.refreshToken,
+    if (organizationId !== undefined) {
+      throw new CliError(
+        EXIT.signIn,
+        await forgetSwitched(
+          runtime,
+          environment,
+          organizationId,
+          (name) =>
+            `Not signed in to ${name} in Agentrail ${environment.name}.`,
+        ),
       );
-      if (fresh !== undefined) return fresh.accessToken;
     }
     throw new CliError(
       EXIT.signIn,
-      `Your sign-in to ${environment.name} expired (${answer.error}). Run ${login}.`,
+      `Not signed in to Agentrail ${environment.name}. Run ${commandFor(environment, 'login')}.`,
     );
   }
-  // RFC 6749 §6: a new refresh token replaces the old one; without one, the
-  // old one stays good.
-  const tokens = {
-    ...answer,
-    refreshToken: answer.refreshToken ?? credential.refreshToken,
-  };
-  const refreshed = credentialFrom(runtime, tokens, {
-    environment: environment.name,
-    tokenEndpoint: credential.tokenEndpoint,
-    clientId: credential.clientId,
-    resource: credential.resource,
-    email: credential.email,
-  });
-  await saveCredential(runtime, environment, refreshed, storage);
-  return refreshed.accessToken;
+  const token = fresh(runtime, stored.credential)
+    ? stored.credential.accessToken
+    : await refresh(runtime, environment, organizationId);
+  return { token, organizationId };
 }

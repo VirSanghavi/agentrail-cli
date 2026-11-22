@@ -7,8 +7,9 @@ import { VERSION } from './version.js';
  * Agentrail's own CLI SDK in the CLI: each request to an Agentrail MCP
  * server says which command ran, in which run and in which of an agent's
  * sessions, so Agentrail can join an agent's CLI runs into its journey
- * (`x-agentrail-cli`). Nothing goes anywhere but those servers: never the
- * sign-in pages or npm. `DO_NOT_TRACK` turns it off.
+ * (`x-agentrail-cli`). Nothing goes anywhere but those servers, which with
+ * Agentrail's own sign-in include its sign-in endpoints: never WorkOS's sign-in
+ * pages or npm. `DO_NOT_TRACK` turns it off.
  */
 export function instrument(
   environments: Environments,

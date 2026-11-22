@@ -5,8 +5,34 @@ import type { Runtime } from './runtime.js';
 /** Where an environment's MCP server says to sign in, and its endpoints. */
 export interface SignInEndpoints {
   readonly resource: string;
+  /** What a sign-in asks for, with a refresh token. */
+  readonly scope: string;
   readonly deviceAuthorizationEndpoint: string;
   readonly tokenEndpoint: string;
+  /** Absent where the authorization server offers no revocation (RFC 7009). */
+  readonly revocationEndpoint: string | undefined;
+}
+
+/**
+ * WorkOS's AuthKit names no scope for the MCP server and takes OpenID's.
+ * Agentrail's own sign-in server names its scope in the resource's
+ * metadata (RFC 9728 `scopes_supported`), so an environment on either one
+ * signs in, and one switched back to WorkOS still does.
+ */
+const WORKOS_SCOPE = 'openid profile email offline_access';
+
+function scopeOf(resourceMetadata: Record<string, unknown>): string {
+  const named = resourceMetadata.scopes_supported;
+  if (
+    !Array.isArray(named) ||
+    named.length === 0 ||
+    !named.every((scope) => typeof scope === 'string')
+  ) {
+    return WORKOS_SCOPE;
+  }
+  // offline_access asks for a refresh token, so a sign-in outlives its
+  // short-lived access token.
+  return [...new Set([...named, 'offline_access'])].join(' ');
 }
 
 async function getJson(
@@ -73,5 +99,11 @@ export async function discoverSignIn(
       `${issuer.origin} does not offer device sign-in.`,
     );
   }
-  return { resource, deviceAuthorizationEndpoint, tokenEndpoint };
+  return {
+    resource,
+    scope: scopeOf(resourceMetadata),
+    deviceAuthorizationEndpoint,
+    tokenEndpoint,
+    revocationEndpoint: stringField(serverMetadata, 'revocation_endpoint'),
+  };
 }

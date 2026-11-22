@@ -12,6 +12,8 @@ Production is the default. To use the separate dev environment, pass
 ```sh
 npm install -g agentrail-cli@latest
 agentrail login              # sign in in your browser
+agentrail org use            # act in another of your organizations
+agentrail workspace use      # and in one of its workspaces
 agentrail tools              # every command your role can use
 agentrail competitors list
 agentrail agent setup        # Claude Code, Codex and Cursor
@@ -29,9 +31,16 @@ just `agentrail`: it belongs to someone else.
   Lists and objects take JSON (`--tag-ids '["…"]'`), and `--input` or
   `--input-file` passes a whole input. `agentrail tools` lists them all, and a
   tool Agentrail adds works without updating the CLI.
+- **Organization.** Commands act in one organization at a time: the one you
+  approved at `agentrail login`, until `agentrail org use <id or name>`
+  switches to another of yours. Each organization gets a sign-in of its own,
+  made from your browser sign-in without a browser; switching back to one
+  the CLI keeps asks Agentrail nothing. `agentrail org current` names it, and
+  an organization whose Admins turned agent access off cannot be chosen.
 - **Workspace.** Commands use `--workspace <id>`, then `AGENTRAIL_WORKSPACE`,
   then the workspace `agentrail link <id>` recorded for the directory, then
-  your default workspace.
+  the one `agentrail workspace use` chose for the organization, then your
+  default workspace. `agentrail workspace current` shows which, and why.
 - **Output.** A table in a terminal; JSON when output is not a terminal, with
   `--json`, or inside a coding agent. Data goes to stdout, messages to stderr.
 - **Agents.** Without a terminal, `agentrail login` prints the sign-in URL
@@ -49,7 +58,8 @@ just `agentrail`: it belongs to someone else.
 - **Credentials** are kept in the OS keychain. `login --insecure-storage`
   keeps them in a file only you can read instead; where the keychain cannot
   keep a sign-in, the CLI says so and never falls back to a file on its own.
-  `logout` removes the sign-in from both places. A token in
+  There is one sign-in for each organization you use. `logout` ends each at
+  Agentrail and removes them from both places. A token in
   `AGENTRAIL_TOKEN` is used as given, wins over a stored sign-in, and is
   never stored.
 - **What Agentrail is told.** Each request to Agentrail names the command
